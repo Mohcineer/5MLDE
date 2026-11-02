@@ -11,7 +11,7 @@ correspondant à votre système. Une installation existante qui passe les vérif
 | uv | Installer Python, les dépendances et lancer les commandes du projet |
 | Python 3.12 | Exécuter le code des TPs, dans l'environnement géré par uv |
 | Dataset Steam téléchargé depuis Kaggle | Fournir les données initiales, absentes du dépôt Git |
-| Git | Versionner le code, les configurations et les dépendances |
+| Git déjà disponible | Versionner le code, les configurations et les dépendances |
 | Éditeur et navigateur | Développer, ouvrir le notebook initial et utiliser les interfaces locales |
 | Compte Teams avec Workflows | Réaliser l'exercice d'alerting du TP4 |
 
@@ -23,6 +23,14 @@ Prévoir un accès Internet pour les téléchargements, de l'espace pour les ima
 et les environnements Python, ainsi que les droits d'installation nécessaires sur votre poste.
 Un GPU n'est pas requis. Sur une machine gérée par l'établissement, faire installer les outils
 manquants par son support si les droits administrateur sont indisponibles.
+
+## 0 - Clonage du répo
+
+Clonez le repository sur votre poste à l'aide de la commande suivante : 
+
+```sh
+git clone https://github.com/SUPINFO-Organization/5MLDE.git
+```
 
 ## 1 — Docker et Docker Compose
 
@@ -242,7 +250,7 @@ Jupyter ou des SDK MLOps n'est nécessaire.
 
 ### Windows
 
-Extraire les supports dans un dossier de travail, puis adapter le chemin :
+Depuis le dépôt cloné à l’étape précédente, adapter le chemin si nécessaire :
 
 ```powershell
 uv python install 3.12
@@ -255,7 +263,7 @@ uv run --locked jupyter lab exploration_steam.ipynb
 
 ### macOS
 
-Dans Terminal, après extraction des supports :
+Dans Terminal, après le clonage du dépôt :
 
 ```sh
 uv python install 3.12
@@ -370,69 +378,7 @@ Le manifeste décrit le fichier de référence : si le téléchargement ne corre
 ne pas présenter ses empreintes comme celles de votre copie. Signaler l'écart avant de poursuivre.
 Conserver les CSV hors de Git : le `.gitignore` du TP1 exclut déjà `data/*.csv`.
 
-## 4 — Git et historique du code
-
-Git permet notamment de relier un modèle MLflow à la révision de son code. Son usage est recommandé
-pour le parcours ; les alternatives sans Git explicitement prévues dans les énoncés restent valables.
-Un compte GitHub n'est pas nécessaire pour un dépôt local.
-
-### Windows
-
-Télécharger et lancer l'installateur [Git pour Windows](https://git-scm.com/install/windows).
-Conserver l'accès à Git depuis la ligne de commande dans les options de l'installateur.
-Rouvrir PowerShell et lancer :
-
-```powershell
-git --version
-```
-
-### macOS
-
-Dans Terminal, lancer `git --version`. Si Git est absent, installer les outils en ligne de commande Apple :
-
-```sh
-xcode-select --install
-```
-
-Terminer l'installation graphique, puis relancer `git --version`.
-[Référence : Git sur macOS](https://git-scm.com/install/mac).
-
-### Linux
-
-Ubuntu/Debian :
-
-```sh
-sudo apt update
-sudo apt install git
-git --version
-```
-
-Fedora :
-
-```sh
-sudo dnf install git
-git --version
-```
-
-Pour les autres distributions, utiliser leur gestionnaire de paquets.
-[Référence : Git sur Linux](https://git-scm.com/install/linux).
-
-### Configurer le projet sur les trois systèmes
-
-Dans le dossier de votre projet, initialiser le dépôt **seulement s'il n'en existe pas déjà**, puis
-configurer votre identité locale en remplaçant les exemples :
-
-```sh
-git init
-git config user.name "Prénom Nom"
-git config user.email "prenom.nom@example.org"
-git status
-```
-
-Vérifier le `.gitignore` avant de committer : exclure `.venv`, `.env`, caches, modèles et données
-volumineuses ; conserver le code, les tests, les configurations sans secrets et `uv.lock`.
-
-## 5 — Éditeur de code et navigateur
+## 4 — Éditeur de code et navigateur
 
 Utiliser votre éditeur habituel s'il sait travailler sur un projet Python. La procédure ci-dessous
 propose Visual Studio Code ; il ne remplace ni Python ni uv.
@@ -476,7 +422,7 @@ l'extension notebook de l'éditeur n'est pas indispensable au parcours.
 
 **Vérification :** le terminal intégré exécute `uv run --locked python --version` depuis le bon dossier.
 
-## 6 — Teams et Workflows pour l'alerting du TP4
+## 5 — Teams et Workflows pour l'alerting du TP4
 
 Prévoir un compte de l'établissement, l'accès à un canal Teams standard dédié au cours et
 l'autorisation d'utiliser **Workflows / Power Automate**. Les droits et licences dépendent du tenant.
@@ -502,7 +448,7 @@ Git. Si Workflows ou le mode d'authentification nécessaire est interdit, utilis
 par l'enseignant ou le repli HTTP décrit dans le TP4, en signalant que Teams n'a pas été validé.
 [Référence : webhooks Teams avec Workflows](https://support.microsoft.com/en-us/workflows/send-messages-in-teams-using-incoming-webhooks).
 
-## 7 — Installer et vérifier les services communs aux TPs
+## 6 — Installer et vérifier les services communs aux TPs
 
 Les services s'installent via Docker : il n'est pas nécessaire d'installer les serveurs MLflow,
 Prefect, Grafana ou PostgreSQL directement sur votre système. Les SDK Python restent dans uv.
@@ -656,7 +602,7 @@ car cela effacerait modèles, historiques, dashboards et traces.
 | `uv` introuvable | Rouvrir le terminal et vérifier le PATH indiqué par l'installateur |
 | Python n'est pas en 3.12 | Se placer dans le projet et utiliser `uv run --locked python`, pas le Python global |
 | Port occupé | Modifier le port hôte dans `.env`, recréer le service et adapter les clients |
-| Montage SQL/Grafana absent | Extraire tous les supports et lancer Compose depuis leur racine |
+| Montage SQL/Grafana absent | Cloner le dépôt complet et lancer Compose depuis sa racine |
 | Un service reste `unhealthy` | Examiner `docker compose ps` et les logs du service concerné |
 | Modèles ou runs absents de l'interface | Vérifier les URI des clients et éviter un second serveur local |
 | Teams/Workflows inaccessible | Vérifier le compte, les droits du tenant et le repli du TP4 |
