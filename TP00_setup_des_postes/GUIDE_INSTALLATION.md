@@ -16,8 +16,8 @@ correspondant à votre système. Une installation existante qui passe les vérif
 | Compte Teams avec Workflows | Réaliser l'exercice d'alerting du TP4 |
 
 Utiliser **PowerShell sous Windows**, **Terminal sous macOS**, et **Bash sous Linux** pour les exemples.
-Les commandes ne comprennent pas le symbole de l'invite du terminal. Les chemins d'exemple sont
-à adapter à l'emplacement où vous avez extrait les supports.
+Les commandes ne comprennent pas le symbole de l'invite du terminal. Dans les exemples, remplacer
+`DOSSIER_DANS_LEQUEL_LE_PROJET_EST_CLONE` par le chemin du dossier `5MLDE` créé par le clonage.
 
 Prévoir un accès Internet pour les téléchargements, de l'espace pour les images Docker, les données
 et les environnements Python, ainsi que les droits d'installation nécessaires sur votre poste.
@@ -254,7 +254,7 @@ Depuis le dépôt cloné à l’étape précédente, adapter le chemin si néces
 
 ```powershell
 uv python install 3.12
-Set-Location "C:\Users\VotreNom\Documents\5MLDE\TPs\TP01_industrialisation"
+Set-Location "DOSSIER_DANS_LEQUEL_LE_PROJET_EST_CLONE\TP01_industrialisation"
 uv sync --locked
 uv run --locked python --version
 uv run --locked python -c "import pandas, sklearn; print('Environnement prêt')"
@@ -267,7 +267,7 @@ Dans Terminal, après le clonage du dépôt :
 
 ```sh
 uv python install 3.12
-cd "$HOME/Documents/5MLDE/TP01_industrialisation"
+cd "DOSSIER_DANS_LEQUEL_LE_PROJET_EST_CLONE/TP01_industrialisation"
 uv sync --locked
 uv run --locked python --version
 uv run --locked python -c "import pandas, sklearn; print('Environnement prêt')"
@@ -276,11 +276,11 @@ uv run --locked jupyter lab exploration_steam.ipynb
 
 ### Linux
 
-Adapter le chemin si votre dossier Documents porte un autre nom :
+Remplacer le placeholder par le chemin du dépôt cloné :
 
 ```sh
 uv python install 3.12
-cd "$HOME/Documents/5MLDE/TP01_industrialisation"
+cd "DOSSIER_DANS_LEQUEL_LE_PROJET_EST_CLONE/TP01_industrialisation"
 uv sync --locked
 uv run --locked python --version
 uv run --locked python -c "import pandas, sklearn; print('Environnement prêt')"
@@ -329,30 +329,30 @@ de l'environnement Python et **avant d'exécuter les cellules du notebook du TP1
 
 Dans l'Explorateur de fichiers, faire un clic droit sur l'archive téléchargée → **Extraire tout**.
 Copier `games_march2025_full.csv` depuis le dossier extrait vers
-`TPs\TP01_industrialisation\data\`. Dans PowerShell, adapter le chemin des supports et vérifier :
+`TP01_industrialisation\data\`. Dans PowerShell, adapter le chemin des supports et vérifier :
 
 ```powershell
-Set-Location "C:\Users\VotreNom\Documents\5MLDE\TPs\TP01_industrialisation"
+Set-Location "DOSSIER_DANS_LEQUEL_LE_PROJET_EST_CLONE\TP01_industrialisation"
 Get-Item .\data\games_march2025_full.csv
 ```
 
 ### macOS
 
 Dans Finder, ouvrir l'archive ZIP pour l'extraire. Copier `games_march2025_full.csv` depuis le
-dossier extrait vers `TPs/TP01_industrialisation/data/`. Dans Terminal :
+dossier extrait vers `TP01_industrialisation/data/`. Dans Terminal :
 
 ```sh
-cd "$HOME/Documents/5MLDE/TP01_industrialisation"
+cd "DOSSIER_DANS_LEQUEL_LE_PROJET_EST_CLONE/TP01_industrialisation"
 ls -lh data/games_march2025_full.csv
 ```
 
 ### Linux
 
 Dans le gestionnaire de fichiers, extraire l'archive ZIP. Copier `games_march2025_full.csv`
-depuis le dossier extrait vers `TPs/TP01_industrialisation/data/`. Dans Bash, adapter le chemin :
+depuis le dossier extrait vers `TP01_industrialisation/data/`. Dans Bash, adapter le chemin :
 
 ```sh
-cd "$HOME/Documents/5MLDE/TP01_industrialisation"
+cd "DOSSIER_DANS_LEQUEL_LE_PROJET_EST_CLONE/TP01_industrialisation"
 ls -lh data/games_march2025_full.csv
 ```
 
@@ -453,31 +453,16 @@ par l'enseignant ou le repli HTTP décrit dans le TP4, en signalant que Teams n'
 Les services s'installent via Docker : il n'est pas nécessaire d'installer les serveurs MLflow,
 Prefect, Grafana ou PostgreSQL directement sur votre système. Les SDK Python restent dans uv.
 
-Conserver cette structure lors de l'extraction :
-
-```text
-TPs/
-  compose.yml
-  .env.example
-  TP01_industrialisation/
-  TP02_donnees_dynamiques/
-  TP03_mlflow/
-  TP04_prefect/
-  TP05_api_supervision/
-    init-db.sql
-    grafana/datasources.yml
-```
-
 Les fichiers du TP5 sont nécessaires aux montages du Compose, même pour un premier lancement.
 Les versions sont fixées dans ce fichier : MLflow 3.16.1, Prefect 3.8.7, Grafana 13.2.3 et PostgreSQL 18.6.
 `docker compose pull` télécharge ces versions sans les remplacer par une nouvelle version majeure.
 
 ### Windows
 
-Docker Desktop doit être démarré. Dans PowerShell, se placer à la racine des supports :
+Docker Desktop doit être démarré. Dans PowerShell, se placer dans le dossier `TP00_setup_des_postes` du dépôt :
 
 ```powershell
-Set-Location "C:\Users\VotreNom\Documents\5MLDE\TPs"
+Set-Location "DOSSIER_DANS_LEQUEL_LE_PROJET_EST_CLONE\TP00_setup_des_postes"
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 docker compose config --quiet
 docker compose pull
@@ -498,7 +483,7 @@ $env:PREFECT_API_URL = "http://localhost:4200/api"
 Docker Desktop doit être démarré. Dans Terminal :
 
 ```sh
-cd "$HOME/Documents/5MLDE/TP00_setup_des_postes"
+cd "DOSSIER_DANS_LEQUEL_LE_PROJET_EST_CLONE/TP00_setup_des_postes"
 test -f .env || cp .env.example .env
 docker compose config --quiet
 docker compose pull
@@ -519,7 +504,7 @@ export PREFECT_API_URL=http://localhost:4200/api
 Vérifier que le service Docker est démarré. Dans Bash :
 
 ```sh
-cd "$HOME/Documents/5MLDE/TP00_setup_des_postes"
+cd "DOSSIER_DANS_LEQUEL_LE_PROJET_EST_CLONE/TP00_setup_des_postes"
 test -f .env || cp .env.example .env
 docker compose config --quiet
 docker compose pull
