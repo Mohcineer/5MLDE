@@ -267,7 +267,7 @@ Dans Terminal, après le clonage du dépôt :
 
 ```sh
 uv python install 3.12
-cd "$HOME/Documents/5MLDE/TPs/TP01_industrialisation"
+cd "$HOME/Documents/5MLDE/TP01_industrialisation"
 uv sync --locked
 uv run --locked python --version
 uv run --locked python -c "import pandas, sklearn; print('Environnement prêt')"
@@ -280,7 +280,7 @@ Adapter le chemin si votre dossier Documents porte un autre nom :
 
 ```sh
 uv python install 3.12
-cd "$HOME/Documents/5MLDE/TPs/TP01_industrialisation"
+cd "$HOME/Documents/5MLDE/TP01_industrialisation"
 uv sync --locked
 uv run --locked python --version
 uv run --locked python -c "import pandas, sklearn; print('Environnement prêt')"
@@ -342,7 +342,7 @@ Dans Finder, ouvrir l'archive ZIP pour l'extraire. Copier `games_march2025_full.
 dossier extrait vers `TPs/TP01_industrialisation/data/`. Dans Terminal :
 
 ```sh
-cd "$HOME/Documents/5MLDE/TPs/TP01_industrialisation"
+cd "$HOME/Documents/5MLDE/TP01_industrialisation"
 ls -lh data/games_march2025_full.csv
 ```
 
@@ -352,7 +352,7 @@ Dans le gestionnaire de fichiers, extraire l'archive ZIP. Copier `games_march202
 depuis le dossier extrait vers `TPs/TP01_industrialisation/data/`. Dans Bash, adapter le chemin :
 
 ```sh
-cd "$HOME/Documents/5MLDE/TPs/TP01_industrialisation"
+cd "$HOME/Documents/5MLDE/TP01_industrialisation"
 ls -lh data/games_march2025_full.csv
 ```
 
@@ -498,7 +498,7 @@ $env:PREFECT_API_URL = "http://localhost:4200/api"
 Docker Desktop doit être démarré. Dans Terminal :
 
 ```sh
-cd "$HOME/Documents/5MLDE/TPs"
+cd "$HOME/Documents/5MLDE/TP00_setup_des_postes"
 test -f .env || cp .env.example .env
 docker compose config --quiet
 docker compose pull
@@ -519,7 +519,7 @@ export PREFECT_API_URL=http://localhost:4200/api
 Vérifier que le service Docker est démarré. Dans Bash :
 
 ```sh
-cd "$HOME/Documents/5MLDE/TPs"
+cd "$HOME/Documents/5MLDE/TP00_setup_des_postes"
 test -f .env || cp .env.example .env
 docker compose config --quiet
 docker compose pull
