@@ -7,3 +7,13 @@ data/*.csv
 *.joblib
 .env
 !exemple_inference.csv
+# TP01 - résultats générés
+runs/
+diagnostics/
+mlruns/
+
+# TP02 - stockage et données temporaires
+*.sqlite
+*.sqlite3
+*.db
+cache/

@@ -3,7 +3,7 @@ import json
 import httpx
 import pytest
 
-from normalisation import (
+from src.normalisation import (
     normaliser_ligne,
     normaliser_prix,
     normaliser_owners
