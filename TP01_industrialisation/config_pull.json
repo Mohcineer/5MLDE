@@ -1,0 +1,38 @@
+{
+  "source": {
+    "type": "api",
+    "path": "data/games.csv"
+  },
+  "output": {
+    "runs_dir": "runs",
+    "run_dir": "runs/pull_1_ajout",
+    "diagnostics_dir": "diagnostics"
+  },
+  "random_state": 42,
+  "test_size": 0.2,
+  "thresholds": {
+    "regression_min_reviews": 10,
+    "classification_min_class_count": 5
+  },
+  "acquisition": {
+    "appids": [
+      620,
+      400,
+      550
+    ],
+    "cache_dir": "cache",
+    "refresh": false
+  },
+  "models": {
+    "regression": {
+      "n_estimators": 40,
+      "max_depth": 12,
+      "min_samples_leaf": 5
+    },
+    "classification": {
+      "n_estimators": 40,
+      "max_depth": 12,
+      "min_samples_leaf": 5
+    }
+  }
+}

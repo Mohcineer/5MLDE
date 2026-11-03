@@ -1,458 +1,335 @@
+"""Validation des données avec Great Expectations (GX Core 1.x) : contrat, barrière et rapports.
 
-import json
+Suites versionnées (créées par le SDK Python, voir `build_suite`) :
+
+| Suite                    | Périmètre                                   | Particularités                              |
+|--------------------------|---------------------------------------------|---------------------------------------------|
+| steam_historical_v1      | corpus complet (CSV + nouveaux jeux)        | sentinelles historiques admises (-1, 0 - 0) |
+| steam_new_games_v1       | nouveaux jeux (origin != historical-csv)    | sentinelles interdites, nulls requis        |
+| steam_push_batch_v1      | lot PUSH de 500 jeux                        | new_games + exactement 500 lignes           |
+| steam_training_audit_v1  | table d'audit des effectifs éligibles       | classes >= 2, effectifs compatibles split   |
+
+Toutes les expectations sont bloquantes (jamais de `mostly` < 1). Les sentinelles historiques
+admises ne concernent que `required_age=-1`, `pct_pos_total=-1`, `num_reviews_total=-1` et la
+tranche `0 - 0` (exclue ensuite par le prétraitement) : elles ne sont jamais étendues aux nouveaux jeux.
+"""
 import hashlib
-from pathlib import Path
+import json
 from datetime import datetime, timezone
+from pathlib import Path
 
-import pandas as pd
 import great_expectations as gx
+import pandas as pd
 
+CONTRACT_VERSION = "2.0.0"
+HISTORICAL_ORIGIN = "historical-csv"
 
-CONTRACT_VERSION = "1.0.0"
+SUITE_NAMES = (
+    "steam_historical_v1",
+    "steam_new_games_v1",
+    "steam_push_batch_v1",
+    "steam_training_audit_v1",
+)
+STRICT_SUITES = ("steam_new_games_v1", "steam_push_batch_v1")
 
+# Features et cibles indispensables au contrat TP1 (positive/negative sont informatives).
 REQUIRED_COLUMNS = [
     "appid", "name", "release_date", "required_age", "price",
     "dlc_count", "windows", "mac", "linux", "achievements",
-    "genres", "positive", "negative", "pct_pos_total",
-    "num_reviews_total", "estimated_owners",
+    "genres", "pct_pos_total", "num_reviews_total", "estimated_owners",
 ]
+NUMBER_TYPES = ["int64", "float64"]
+MAX_REPORTED_APPIDS = 20
+
+
+class DataValidationError(ValueError):
+    """Rejet métier : un contrôle requis a échoué (rapport conservé)."""
+
+
+class DataValidationTechnicalError(RuntimeError):
+    """Erreur technique GX ou absence de résultat : jamais une autorisation d'entraîner."""
 
 
 def create_validation_context():
-    return gx.get_context()
+    return gx.get_context(mode="ephemeral")
 
 
-def add_base_expectations(suite):
+# --- construction des suites ------------------------------------------------------------------
+
+def _e():
+    return gx.expectations
+
+
+def _add_structure(suite):
     for column in REQUIRED_COLUMNS:
-        suite.add_expectation(
-            gx.expectations.ExpectColumnToExist(column=column)
-        )
-
-    suite.add_expectation(
-        gx.expectations.ExpectTableRowCountToBeBetween(min_value=1)
-    )
-    suite.add_expectation(
-        gx.expectations.ExpectColumnValuesToNotBeNull(column="appid")
-    )
-    suite.add_expectation(
-        gx.expectations.ExpectColumnValuesToBeOfType(
-            column="appid", type_="int64"
-        )
-    )
-    suite.add_expectation(
-        gx.expectations.ExpectColumnValuesToBeBetween(
-            column="appid", min_value=1
-        )
-    )
-    suite.add_expectation(
-        gx.expectations.ExpectColumnValuesToBeUnique(column="appid")
-    )
+        suite.add_expectation(_e().ExpectColumnToExist(column=column))
+    suite.add_expectation(_e().ExpectTableRowCountToBeBetween(min_value=1))
 
 
-def add_numeric_expectations(suite, historical=False):
-    for column in [
-        "price",
-        "dlc_count",
-        "achievements",
-        "positive",
-        "negative",
-    ]:
-        suite.add_expectation(
-            gx.expectations.ExpectColumnValuesToBeBetween(
-                column=column,
-                min_value=0,
-                mostly=1.0,
-            )
-        )
-
-    suite.add_expectation(
-        gx.expectations.ExpectColumnValuesToBeBetween(
-            column="num_reviews_total",
-            min_value=-1 if historical else 0,
-            mostly=1.0,
-        )
-    )
-
-    suite.add_expectation(
-        gx.expectations.ExpectColumnValuesToBeBetween(
-            column="required_age",
-            min_value=-1 if historical else 0,
-            mostly=1.0,
-        )
-    )
-
-    suite.add_expectation(
-        gx.expectations.ExpectColumnValuesToBeBetween(
-            column="pct_pos_total",
-            min_value=-1 if historical else 0,
-            max_value=100,
-            mostly=1.0,
-        )
-    )
-
-    if not historical:
-        suite.add_expectation(
-            gx.expectations.ExpectColumnValuesToBeBetween(
-                column="num_reviews_total",
-                min_value=10,
-                mostly=1.0,
-            )
-        )
+def _add_identity(suite):
+    suite.add_expectation(_e().ExpectColumnValuesToNotBeNull(column="appid"))
+    suite.add_expectation(_e().ExpectColumnValuesToBeOfType(column="appid", type_="int64"))
+    suite.add_expectation(_e().ExpectColumnValuesToBeBetween(column="appid", min_value=1))
+    suite.add_expectation(_e().ExpectColumnValuesToBeUnique(column="appid"))
 
 
-def add_format_expectations(suite, strict=False):
-    for column in ["windows", "mac", "linux"]:
-        suite.add_expectation(
-            gx.expectations.ExpectColumnValuesToBeInSet(
-                column=column,
-                value_set=[True, False],
-            )
-        )
-
-    suite.add_expectation(
-        gx.expectations.ExpectColumnValuesToBeOfType(
-            column="genres",
-            type_="object",
-        )
-    )
-
-    suite.add_expectation(
-        gx.expectations.ExpectColumnValuesToMatchRegex(
-            column="release_date",
-            regex=r"^\d{4}-\d{2}-\d{2}$",
-            mostly=1.0,
-        )
-    )
-
+def _add_numeric(suite, strict):
+    for column in ("price", "required_age", "dlc_count", "achievements",
+                   "pct_pos_total", "num_reviews_total"):
+        suite.add_expectation(_e().ExpectColumnValuesToBeInTypeList(
+            column=column, type_list=NUMBER_TYPES))
+    # Bornes hautes finies : rejettent l'infini sans écarter les valeurs extrêmes réelles.
+    suite.add_expectation(_e().ExpectColumnValuesToBeBetween(
+        column="price", min_value=0, max_value=1_000_000))
+    suite.add_expectation(_e().ExpectColumnValuesToBeBetween(
+        column="dlc_count", min_value=0, max_value=1_000_000))
+    suite.add_expectation(_e().ExpectColumnValuesToBeBetween(
+        column="achievements", min_value=0, max_value=1_000_000))
+    suite.add_expectation(_e().ExpectColumnValuesToBeBetween(
+        column="required_age", min_value=-1 if not strict else 0, max_value=100))
+    suite.add_expectation(_e().ExpectColumnValuesToBeBetween(
+        column="pct_pos_total", min_value=-1 if not strict else 0, max_value=100))
+    suite.add_expectation(_e().ExpectColumnValuesToBeBetween(
+        column="num_reviews_total", min_value=-1 if not strict else 10, max_value=1_000_000_000))
     if strict:
-        suite.add_expectation(
-            gx.expectations.ExpectColumnValuesToNotBeNull(
-                column="name"
-            )
-        )
+        # Une règle de plage ignore les nulls : la présence est donc exigée explicitement.
+        for column in ("pct_pos_total", "num_reviews_total", "dlc_count"):
+            suite.add_expectation(_e().ExpectColumnValuesToNotBeNull(column=column))
 
 
-def add_owners_expectations(suite, strict=False):
-    suite.add_expectation(
-        gx.expectations.ExpectColumnValuesToMatchRegex(
-            column="estimated_owners",
-            regex=r"^\d+ - \d+$",
-            mostly=1.0,
-        )
-    )
-
+def _add_formats(suite, strict):
+    for column in ("windows", "mac", "linux"):
+        suite.add_expectation(_e().ExpectColumnValuesToNotBeNull(column=column))
+        suite.add_expectation(_e().ExpectColumnValuesToBeOfType(column=column, type_="bool"))
+        suite.add_expectation(_e().ExpectColumnValuesToBeInSet(
+            column=column, value_set=[True, False]))
+    suite.add_expectation(_e().ExpectColumnValuesToMatchRegex(
+        column="genres", regex=r"^(\[.*\]|Unknown)$"))
+    suite.add_expectation(_e().ExpectColumnValuesToMatchStrftimeFormat(
+        column="release_date", strftime_format="%Y-%m-%d"))
+    suite.add_expectation(_e().ExpectColumnValuesToMatchRegex(
+        column="estimated_owners", regex=r"^\d+ - \d+$"))
+    # Ordre des bornes (une regex seule n'attrape pas « 50000 - 20000 ») sur colonnes dérivées.
+    suite.add_expectation(_e().ExpectColumnPairValuesAToBeGreaterThanB(
+        column_A="owners_max", column_B="owners_min", or_equal=not strict,
+        ignore_row_if="either_value_is_missing"))
     if strict:
-        suite.add_expectation(
-            gx.expectations.ExpectColumnValuesToNotBeInSet(
-                column="estimated_owners",
-                value_set=["0 - 0"],
-            )
-        )
+        for column in ("name", "release_date", "genres", "estimated_owners"):
+            suite.add_expectation(_e().ExpectColumnValuesToNotBeNull(column=column))
+        suite.add_expectation(_e().ExpectColumnValuesToNotBeInSet(
+            column="estimated_owners", value_set=["0 - 0"]))
 
 
-def validate_owners_ranges(data, strict=False):
-    owners = data["estimated_owners"].dropna()
-
-    for value in owners:
-        parts = value.split(" - ")
-
-        if len(parts) != 2:
-            raise ValueError(
-                f"Format estimated_owners invalide : {value}"
-            )
-
-        try:
-            minimum, maximum = int(parts[0]), int(parts[1])
-        except ValueError as exc:
-            raise ValueError(
-                f"Bornes estimated_owners invalides : {value}"
-            ) from exc
-
-        if minimum < 0 or maximum < 0 or minimum > maximum:
-            raise ValueError(
-                f"Tranche estimated_owners incohérente : {value}"
-            )
-
-        if strict and minimum == 0 and maximum == 0:
-            raise ValueError(
-                "La tranche 0 - 0 est interdite pour les nouveaux jeux."
-            )
-
-    return True
+def _add_training_audit(suite):
+    for column in ("task", "eligible_count", "train_count", "test_count", "class_count"):
+        suite.add_expectation(_e().ExpectColumnToExist(column=column))
+    suite.add_expectation(_e().ExpectColumnValuesToBeInSet(
+        column="task", value_set=["regression", "classification"]))
+    suite.add_expectation(_e().ExpectColumnValuesToBeBetween(column="train_count", min_value=2))
+    suite.add_expectation(_e().ExpectColumnValuesToBeBetween(column="test_count", min_value=2))
+    # train + test == eligible
+    suite.add_expectation(_e().ExpectColumnValuesToBeBetween(
+        column="split_gap", min_value=0, max_value=0))
+    # Classification : au moins deux classes et effectifs compatibles avec le split stratifié.
+    classification = {"row_condition": 'task=="classification"', "condition_parser": "pandas"}
+    suite.add_expectation(_e().ExpectColumnValuesToBeBetween(
+        column="class_count", min_value=2, **classification))
+    suite.add_expectation(_e().ExpectColumnPairValuesAToBeGreaterThanB(
+        column_A="test_count", column_B="class_count", or_equal=True, **classification))
+    suite.add_expectation(_e().ExpectColumnPairValuesAToBeGreaterThanB(
+        column_A="train_count", column_B="class_count", or_equal=True, **classification))
 
 
-def add_training_audit_expectations(suite):
-    audit_columns = [
-        "task",
-        "eligible_count",
-        "train_count",
-        "test_count",
-        "class_count",
-    ]
-
-    for column in audit_columns:
-        suite.add_expectation(
-            gx.expectations.ExpectColumnToExist(column=column)
-        )
-
-    for column in [
-        "eligible_count",
-        "train_count",
-        "test_count",
-        "class_count",
-    ]:
-        suite.add_expectation(
-            gx.expectations.ExpectColumnValuesToBeBetween(
-                column=column,
-                min_value=0,
-            )
-        )
-
-    suite.add_expectation(
-        gx.expectations.ExpectColumnValuesToBeInSet(
-            column="task",
-            value_set=["regression", "classification"],
-        )
-    )
+def build_suite(name):
+    if name not in SUITE_NAMES:
+        raise ValueError(f"Suite inconnue : {name}")
+    suite = gx.ExpectationSuite(name=name)
+    if name == "steam_training_audit_v1":
+        _add_training_audit(suite)
+        return suite
+    strict = name in STRICT_SUITES
+    _add_structure(suite)
+    _add_identity(suite)
+    _add_numeric(suite, strict)
+    _add_formats(suite, strict)
+    if name == "steam_push_batch_v1":
+        suite.add_expectation(_e().ExpectTableRowCountToBeBetween(min_value=500, max_value=500))
+    return suite
 
 
-def validate_training_audit(data):
-    """Vérifier la cohérence des effectifs de l'audit d'entraînement."""
-
-    for _, row in data.iterrows():
-        task = row["task"]
-        eligible = int(row["eligible_count"])
-        train = int(row["train_count"])
-        test = int(row["test_count"])
-        class_count = int(row["class_count"])
-
-        if train + test != eligible:
-            raise ValueError(
-                f"Effectifs incohérents pour {task} : "
-                f"train ({train}) + test ({test}) != eligible ({eligible})."
-            )
-
-        if train <= 0 or test <= 0:
-            raise ValueError(
-                f"Effectifs train/test insuffisants pour {task}."
-            )
-
-        if task == "classification" and class_count < 2:
-            raise ValueError(
-                "Classification impossible : au moins deux classes sont nécessaires."
-            )
-
-    return True
-
-
-def create_expectation_suites(context):
-    suite_names = [
-        "steam_historical_v1",
-        "steam_new_games_v1",
-        "steam_push_batch_v1",
-        "steam_training_audit_v1",
-    ]
-
+def create_expectation_suites(context, names=SUITE_NAMES):
     suites = {}
-
-    for name in suite_names:
-        suite = gx.ExpectationSuite(name=name)
-
-        if name == "steam_training_audit_v1":
-            add_training_audit_expectations(suite)
-
-        else:
-            add_base_expectations(suite)
-
-            historical = name == "steam_historical_v1"
-            strict = name in [
-                "steam_new_games_v1",
-                "steam_push_batch_v1",
-            ]
-
-            add_numeric_expectations(suite, historical)
-            add_format_expectations(suite, strict)
-            add_owners_expectations(suite, strict)
-
-            if name == "steam_push_batch_v1":
-                suite.add_expectation(
-                    gx.expectations.ExpectTableRowCountToBeBetween(
-                        min_value=500,
-                        max_value=500,
-                    )
-                )
-
+    for name in names:
+        suite = build_suite(name)
         context.suites.add(suite)
         suites[name] = suite
-
     return suites
 
 
-def validate_dataframe(
-    data,
-    suite_name,
-    report_dir=None,
-    source="unknown",
-):
-    """Exécuter une suite GX et bloquer le traitement si elle échoue."""
+# --- exécution --------------------------------------------------------------------------------
 
+def _with_derived_columns(data, suite_name):
+    """Colonnes dérivées pour les contrôles non exprimables par une regex (copie, jamais l'original)."""
+    derived = data.copy()
+    if suite_name == "steam_training_audit_v1":
+        if {"train_count", "test_count", "eligible_count"} <= set(derived.columns):
+            derived["split_gap"] = (
+                derived["train_count"] + derived["test_count"] - derived["eligible_count"]).abs()
+        return derived
+    if "estimated_owners" in derived.columns:
+        bounds = derived["estimated_owners"].astype("string").str.extract(r"^(\d+) - (\d+)$")
+        derived["owners_min"] = pd.to_numeric(bounds[0])
+        derived["owners_max"] = pd.to_numeric(bounds[1])
+    return derived
+
+
+def snapshot_hash(data):
+    try:
+        hashed = pd.util.hash_pandas_object(data, index=True).values.tobytes()
+    except TypeError:  # colonne non hachable (listes) : repli sur la sérialisation
+        hashed = data.to_csv(index=False).encode("utf-8")
+    return hashlib.sha256(hashed).hexdigest()
+
+
+def _failed_controls(data, result):
+    failed = []
+    for item in result.results:
+        if item.success:
+            continue
+        kwargs = dict(item.expectation_config.kwargs)
+        kwargs.pop("batch_id", None)
+        detail = item.result or {}
+        control = {
+            "expectation": item.expectation_config.type,
+            "kwargs": kwargs,
+            "unexpected_count": detail.get("unexpected_count"),
+            "examples": [str(v) for v in (detail.get("partial_unexpected_list") or [])[:5]],
+        }
+        info = item.exception_info or {}
+        if any(entry.get("raised_exception") for entry in info.values() if isinstance(entry, dict)):
+            control["not_evaluated"] = True
+            control["exception"] = next(
+                (e.get("exception_message") for e in info.values() if isinstance(e, dict)
+                 and e.get("raised_exception")), None)
+        column = kwargs.get("column")
+        if (column in data.columns and "appid" in data.columns
+                and control["examples"] and column != "appid"):
+            wanted = detail.get("partial_unexpected_list") or []
+            rows = data.loc[data[column].isin(wanted), "appid"]
+            control["appids"] = [str(a) for a in rows.head(MAX_REPORTED_APPIDS)]
+        failed.append(control)
+    return failed
+
+
+def _save_json(directory, name, payload):
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{name}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.json"
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False, default=str),
+                    encoding="utf-8")
+    return path
+
+
+def validate_dataframe(data, suite_name, report_dir=None, source="unknown"):
+    """Exécuter une suite GX sur le DataFrame complet ; lever une exception si elle échoue.
+
+    - échec d'un contrôle -> `DataValidationError` (ValueError) après écriture du rapport ;
+    - erreur GX ou résultat absent -> `DataValidationTechnicalError` (RuntimeError), rapport conservé.
+    """
     if not isinstance(data, pd.DataFrame):
-        raise TypeError(
-            "La validation attend un pandas.DataFrame."
-        )
-
+        raise TypeError("La validation attend un pandas.DataFrame.")
     if data.empty:
-        raise ValueError(
-            "Validation refusée : DataFrame vide."
-        )
-
-    allowed_suites = [
-        "steam_historical_v1",
-        "steam_new_games_v1",
-        "steam_push_batch_v1",
-        "steam_training_audit_v1",
-    ]
-
-    if suite_name not in allowed_suites:
+        raise ValueError("Validation refusée : DataFrame vide.")
+    if suite_name not in SUITE_NAMES:
         raise ValueError(f"Suite inconnue : {suite_name}")
 
-    snapshot_hash = hashlib.sha256(
-        pd.util.hash_pandas_object(
-            data,
-            index=True,
-        ).values.tobytes()
-    ).hexdigest()
+    digest = snapshot_hash(data)
+    base = {
+        "date": datetime.now(timezone.utc).isoformat(),
+        "source": source,
+        "suite": suite_name,
+        "suite_version": suite_name.rsplit("_", 1)[-1],
+        "contract_version": CONTRACT_VERSION,
+        "great_expectations_version": gx.__version__,
+        "snapshot_sha256": digest,
+        "row_count": len(data),
+    }
 
-    def save_report(report):
+    def save(report):
         if report_dir is not None:
-            directory = Path(report_dir)
-            directory.mkdir(
-                parents=True,
-                exist_ok=True,
-            )
-
-            report_path = directory / (
-                f"validation_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.json"
-            )
-
-            report_path.write_text(
-                json.dumps(
-                    report,
-                    indent=2,
-                    ensure_ascii=False,
-                ),
-                encoding="utf-8",
-            )
-
-    try:
-        # Contrôles complémentaires.
-        if suite_name == "steam_training_audit_v1":
-            validate_training_audit(data)
-        else:
-            validate_owners_ranges(
-                data,
-                strict=suite_name in [
-                    "steam_new_games_v1",
-                    "steam_push_batch_v1",
-                ],
-            )
-
-        # Création du contexte Great Expectations.
-        context = create_validation_context()
-        suites = create_expectation_suites(context)
-
-        datasource = context.data_sources.add_pandas(
-            name="steam_validation_source"
-        )
-
-        asset = datasource.add_dataframe_asset(
-            name="steam_validation_asset"
-        )
-
-        batch_definition = asset.add_batch_definition_whole_dataframe(
-            name="steam_validation_batch"
-        )
-
-        validation_definition = gx.ValidationDefinition(
-            name=f"validation_{suite_name}",
-            data=batch_definition,
-            suite=suites[suite_name],
-        )
-
-        context.validation_definitions.add(
-            validation_definition
-        )
-
-        result = validation_definition.run(
-            batch_parameters={"dataframe": data}
-        )
-
-        if result is None or not hasattr(result, "success"):
-            raise RuntimeError(
-                "Great Expectations n'a retourné aucun résultat exploitable."
-            )
-
-        failed_controls = []
-
-        for item in result.results:
-            if not item.success:
-                failed_controls.append({
-                    "expectation": item.expectation_config.type,
-                    "kwargs": item.expectation_config.kwargs,
-                })
-
-        report = {
-            "date": datetime.now(timezone.utc).isoformat(),
-            "source": source,
-            "suite": suite_name,
-            "contract_version": CONTRACT_VERSION,
-            "great_expectations_version": gx.__version__,
-            "snapshot_sha256": snapshot_hash,
-            "success": bool(result.success),
-            "row_count": len(data),
-            "failed_controls": failed_controls,
-            "rejected_appids": (
-                data["appid"].dropna().astype(str).tolist()
-                if not result.success and "appid" in data.columns
-                else []
-            ),
-        }
-
-        save_report(report)
-
-        if not result.success:
-            raise ValueError(
-                f"Validation refusée avec {suite_name}. "
-                f"{len(failed_controls)} contrôle(s) en échec."
-            )
-
+            report["report_file"] = str(_save_json(report_dir, "validation", report))
         return report
 
-    except ValueError:
-        # Les rejets métier sont déjà documentés.
-        raise
-
+    try:
+        context = create_validation_context()
+        suite = build_suite(suite_name)
+        context.suites.add(suite)
+        datasource = context.data_sources.add_pandas(name="steam_validation_source")
+        asset = datasource.add_dataframe_asset(name="steam_validation_asset")
+        batch_definition = asset.add_batch_definition_whole_dataframe(name="steam_validation_batch")
+        validation_definition = gx.ValidationDefinition(
+            name=f"validation_{suite_name}", data=batch_definition, suite=suite)
+        context.validation_definitions.add(validation_definition)
+        result = validation_definition.run(
+            batch_parameters={"dataframe": _with_derived_columns(data, suite_name)})
+        if result is None or not hasattr(result, "success"):
+            raise RuntimeError("Great Expectations n'a retourné aucun résultat exploitable.")
+        failed = _failed_controls(data, result)
+        success = bool(result.success)
     except Exception as exc:
-        error_report = {
-            "date": datetime.now(timezone.utc).isoformat(),
-            "source": source,
-            "suite": suite_name,
-            "contract_version": CONTRACT_VERSION,
-            "great_expectations_version": gx.__version__,
-            "snapshot_sha256": snapshot_hash,
-            "success": False,
-            "row_count": len(data),
-            "failed_controls": [],
-            "rejected_appids": (
-                data["appid"].dropna().astype(str).tolist()
-                if "appid" in data.columns
-                else []
-            ),
-            "error": str(exc),
-        }
+        save({**base, "success": False, "failed_controls": [], "error": str(exc),
+              "error_type": type(exc).__name__,
+              "not_evaluated": "tous les contrôles de la suite"})
+        raise DataValidationTechnicalError(f"Échec technique de la validation : {exc}") from exc
 
-        save_report(error_report)
+    report = save({**base, "success": success, "failed_controls": failed,
+                   "rejected_appids": sorted({a for c in failed for a in c.get("appids", [])})[
+                       :MAX_REPORTED_APPIDS]})
+    if not success:
+        raise DataValidationError(
+            f"Validation refusée avec {suite_name}. {len(failed)} contrôle(s) en échec.")
+    return report
 
-        raise RuntimeError(
-            f"Échec technique de la validation : {exc}"
-        ) from exc
+
+def validate_snapshot(data, config=None, report_dir=None, source="unknown", push_batch=False):
+    """Valider un snapshot candidat complet : toutes les suites requises doivent réussir.
+
+    - corpus historique/complet : `steam_historical_v1` sur toutes les lignes ;
+    - nouveaux jeux (origin != historical-csv) : `steam_new_games_v1` sur ce sous-ensemble,
+      pour qu'une règle stricte ne disparaisse pas dans le mélange des sources ;
+    - lot PUSH : `steam_push_batch_v1` (500 lignes exactement) ;
+    - aptitude à entraîner : `steam_training_audit_v1` sur les effectifs éligibles.
+    """
+    from src.preprocessing import build_training_audit  # import tardif : évite un cycle
+
+    config = config or {}
+    reports = []
+    rejected_dir = report_dir
+
+    def run(frame, suite, label):
+        try:
+            reports.append(validate_dataframe(frame, suite, report_dir, f"{source} [{label}]"))
+        except (DataValidationError, DataValidationTechnicalError):
+            if rejected_dir is not None:
+                _save_rejected_snapshot(data, rejected_dir)
+            raise
+
+    if push_batch:
+        run(data, "steam_push_batch_v1", "lot PUSH")
+    else:
+        run(data, "steam_historical_v1", "snapshot complet")
+        if "origin" in data.columns:
+            new_rows = data[data["origin"] != HISTORICAL_ORIGIN]
+            if not new_rows.empty:
+                run(new_rows, "steam_new_games_v1", "nouveaux jeux")
+    run(build_training_audit(data, config), "steam_training_audit_v1", "aptitude à entraîner")
+    return reports
+
+
+def _save_rejected_snapshot(data, directory):
+    directory = Path(directory) / "rejected_snapshots"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"rejected_{snapshot_hash(data)[:16]}.csv"
+    if not path.exists():
+        data.to_csv(path, index=False)
+    return path

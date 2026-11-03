@@ -1,249 +1,241 @@
+"""Stockage durable SQLite : événements, unicité, réservation atomique des lots, jobs.
 
+Le compteur porte sur les appids distincts valides non encore affectés. L'insertion, le calcul du
+nombre de jeux en attente et la réservation des 500 jeux se font dans UNE transaction
+`BEGIN IMMEDIATE` : deux POST concurrents ne peuvent pas réserver deux fois les mêmes jeux, ni
+lancer deux entraînements pour le même seuil (un `if compteur == 500` hors transaction le pourrait).
+"""
 import json
 import os
 import sqlite3
 from pathlib import Path
 
 BATCH_SIZE = 500
+STATUSES = ("PENDING", "RUNNING", "SUCCEEDED", "FAILED")
 
-DB_PATH = Path(
-    os.getenv("PUSH_DB_PATH", "artifacts/push.sqlite3")
-)
+DB_PATH = Path(os.getenv("PUSH_DB_PATH", "artifacts/push.sqlite3"))
+_initialized = set()
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS batches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    status TEXT NOT NULL DEFAULT 'PENDING'
+        CHECK (status IN ('PENDING', 'RUNNING', 'SUCCEEDED', 'FAILED')),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    started_at TEXT,
+    finished_at TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    error TEXT,
+    report_path TEXT,
+    run_dir TEXT,
+    snapshot_sha256 TEXT
+);
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id TEXT NOT NULL UNIQUE,
+    appid INTEGER NOT NULL UNIQUE,
+    payload TEXT NOT NULL,
+    game TEXT NOT NULL,
+    batch_id INTEGER REFERENCES batches(id),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_events_pending ON events(batch_id) WHERE batch_id IS NULL;
+"""
+
+
+def state_dir():
+    return DB_PATH.parent
 
 
 def get_connection():
-    """Ouvrir une connexion SQLite et activer les clés étrangères."""
+    """Connexion sans transaction implicite (les transactions sont explicites)."""
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-
-    connection = sqlite3.connect(
-        DB_PATH,
-        timeout=30,
-        isolation_level=None,
-    )
+    connection = sqlite3.connect(DB_PATH, timeout=30, isolation_level=None)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     connection.execute("PRAGMA journal_mode = WAL")
-
     return connection
 
 
 def init_storage():
-    """Créer les tables si elles n'existent pas."""
-    with get_connection() as connection:
-        connection.executescript("""
-            CREATE TABLE IF NOT EXISTS events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                event_id TEXT NOT NULL UNIQUE,
-                appid INTEGER NOT NULL UNIQUE,
-                payload TEXT NOT NULL,
-                batch_id INTEGER,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (batch_id) REFERENCES batches(id)
-            );
+    """Créer les tables une seule fois par base."""
+    key = str(DB_PATH.resolve())
+    if key in _initialized and DB_PATH.exists():
+        return
+    connection = get_connection()
+    try:
+        connection.executescript(SCHEMA)
+    finally:
+        connection.close()
+    _initialized.add(key)
 
-            CREATE TABLE IF NOT EXISTS batches (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                status TEXT NOT NULL DEFAULT 'PENDING',
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                started_at TEXT,
-                finished_at TEXT,
-                error TEXT
-            );
-        """)
+
+def _pending_count(connection):
+    return connection.execute(
+        "SELECT COUNT(*) FROM events WHERE batch_id IS NULL").fetchone()[0]
 
 
 def store_event(event):
-    """
-    Enregistrer un événement ou reconnaître un doublon.
-    Réserver atomiquement un lot dès que 500 jeux sont disponibles.
-    """
+    """Stocker un événement (202), reconnaître un doublon (200) ou signaler un conflit (409)."""
     init_storage()
-
-    payload = event.model_dump(mode="json") if hasattr(
-        event, "model_dump"
-    ) else event
-
-    event_id = payload["event_id"]
-    game = payload["game"]
-    appid = game["appid"]
+    payload = event.model_dump(mode="json") if hasattr(event, "model_dump") else event
+    event_id, game = payload["event_id"], payload["game"]
     serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    serialized_game = json.dumps(game, ensure_ascii=False, sort_keys=True)
 
     connection = get_connection()
-
     try:
         connection.execute("BEGIN IMMEDIATE")
 
-        existing_event = connection.execute(
-            "SELECT event_id, appid, payload FROM events WHERE event_id = ?",
-            (event_id,),
-        ).fetchone()
+        by_event = connection.execute(
+            "SELECT payload FROM events WHERE event_id = ?", (event_id,)).fetchone()
+        if by_event is not None:
+            status = "duplicate" if by_event["payload"] == serialized else "conflict"
+            result = {"status": status, "batch_id": None, "pending_count": _pending_count(connection)}
+            connection.execute("ROLLBACK")
+            return result
 
-        if existing_event:
-            if existing_event["payload"] == serialized:
-                connection.commit()
-                return {
-                    "status": "duplicate",
-                    "batch_id": None,
-                    "pending_count": get_pending_count(),
-                }
-
-            connection.rollback()
-            return {"status": "conflict", "batch_id": None}
-
-        existing_app = connection.execute(
-            "SELECT event_id, payload FROM events WHERE appid = ?",
-            (appid,),
-        ).fetchone()
-
-        if existing_app:
-            connection.rollback()
-            return {"status": "conflict", "batch_id": None}
+        by_appid = connection.execute(
+            "SELECT game FROM events WHERE appid = ?", (game["appid"],)).fetchone()
+        if by_appid is not None:
+            # Même jeu identique sous un autre event_id : reconnu ; valeurs différentes : conflit.
+            status = "duplicate" if by_appid["game"] == serialized_game else "conflict"
+            result = {"status": status, "batch_id": None, "pending_count": _pending_count(connection)}
+            connection.execute("ROLLBACK")
+            return result
 
         connection.execute(
-            """
-            INSERT INTO events (event_id, appid, payload)
-            VALUES (?, ?, ?)
-            """,
-            (event_id, appid, serialized),
-        )
-
-        pending = connection.execute(
-            """
-            SELECT COUNT(*) AS total
-            FROM events
-            WHERE batch_id IS NULL
-            """
-        ).fetchone()["total"]
+            "INSERT INTO events (event_id, appid, payload, game) VALUES (?, ?, ?, ?)",
+            (event_id, game["appid"], serialized, serialized_game))
 
         batch_id = None
-
-        if pending >= BATCH_SIZE:
+        if _pending_count(connection) >= BATCH_SIZE:
+            batch_id = connection.execute("INSERT INTO batches DEFAULT VALUES").lastrowid
             connection.execute(
-                "INSERT INTO batches DEFAULT VALUES"
-            )
-            batch_id = connection.execute(
-                "SELECT last_insert_rowid()"
-            ).fetchone()[0]
+                """UPDATE events SET batch_id = ?
+                   WHERE id IN (SELECT id FROM events WHERE batch_id IS NULL ORDER BY id LIMIT ?)""",
+                (batch_id, BATCH_SIZE))
 
-            connection.execute(
-                """
-                UPDATE events
-                SET batch_id = ?
-                WHERE id IN (
-                    SELECT id
-                    FROM events
-                    WHERE batch_id IS NULL
-                    ORDER BY id
-                    LIMIT ?
-                )
-                """,
-                (batch_id, BATCH_SIZE),
-            )
-
-        connection.commit()
-
-        return {
-            "status": "accepted",
-            "batch_id": batch_id,
-            "pending_count": get_pending_count(),
-        }
-
-    except Exception:
-        connection.rollback()
+        result = {"status": "accepted", "batch_id": batch_id,
+                  "pending_count": _pending_count(connection)}
+        connection.execute("COMMIT")
+        return result
+    except BaseException:
+        if connection.in_transaction:
+            connection.execute("ROLLBACK")
         raise
-
     finally:
         connection.close()
 
 
 def get_pending_count():
-    """Retourner le nombre de jeux qui attendent encore un lot."""
-    with get_connection() as connection:
-        result = connection.execute(
-            "SELECT COUNT(*) AS total FROM events WHERE batch_id IS NULL"
-        ).fetchone()
+    init_storage()
+    connection = get_connection()
+    try:
+        return _pending_count(connection)
+    finally:
+        connection.close()
 
-        return result["total"]
+
+def _batch_row(row):
+    return {key: row[key] for key in row.keys()}
 
 
-def get_batch(batch_id):
-    """Récupérer les 500 événements d'un lot."""
-    with get_connection() as connection:
-        batch = connection.execute(
-            "SELECT * FROM batches WHERE id = ?",
-            (batch_id,),
-        ).fetchone()
-
-        if batch is None:
+def get_batch(batch_id, with_events=False):
+    """État d'un lot ; les 500 événements ne sont chargés que si demandé (worker)."""
+    init_storage()
+    connection = get_connection()
+    try:
+        row = connection.execute("SELECT * FROM batches WHERE id = ?", (batch_id,)).fetchone()
+        if row is None:
             return None
-
-        events = connection.execute(
-            """
-            SELECT payload
-            FROM events
-            WHERE batch_id = ?
-            ORDER BY id
-            """,
-            (batch_id,),
-        ).fetchall()
-
-        return {
-            "batch_id": batch_id,
-            "status": batch["status"],
-            "events": [json.loads(row["payload"]) for row in events],
-            "error": batch["error"],
-        }
+        batch = {**_batch_row(row), "batch_id": row["id"]}
+        count = connection.execute(
+            "SELECT COUNT(*) FROM events WHERE batch_id = ?", (batch_id,)).fetchone()[0]
+        batch["game_count"] = count
+        if with_events:
+            rows = connection.execute(
+                "SELECT payload FROM events WHERE batch_id = ? ORDER BY id", (batch_id,)).fetchall()
+            batch["events"] = [json.loads(r["payload"]) for r in rows]
+        return batch
+    finally:
+        connection.close()
 
 
-def update_batch_status(batch_id, status, error=None):
-    """Mettre à jour l'état d'un lot."""
-    if status not in {"PENDING", "RUNNING", "SUCCEEDED", "FAILED"}:
-        raise ValueError("Statut de lot invalide")
-
-    with get_connection() as connection:
+def claim_next_batch():
+    """Passer le plus ancien lot PENDING en RUNNING (une seule fois, même en concurrence)."""
+    init_storage()
+    connection = get_connection()
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            "SELECT id FROM batches WHERE status = 'PENDING' ORDER BY id LIMIT 1").fetchone()
+        if row is None:
+            connection.execute("COMMIT")
+            return None
         connection.execute(
-            """
-            UPDATE batches
-            SET status = ?,
-                error = ?,
-                started_at = CASE
-                    WHEN ? = 'RUNNING' THEN CURRENT_TIMESTAMP
-                    ELSE started_at
-                END,
-                finished_at = CASE
-                    WHEN ? IN ('SUCCEEDED', 'FAILED') THEN CURRENT_TIMESTAMP
-                    ELSE finished_at
-                END
-            WHERE id = ?
-            """,
-            (status, error, status, status, batch_id),
-        )
+            """UPDATE batches SET status = 'RUNNING', attempts = attempts + 1,
+                   started_at = CURRENT_TIMESTAMP, error = NULL WHERE id = ?""", (row["id"],))
+        connection.execute("COMMIT")
+        return row["id"]
+    except BaseException:
+        if connection.in_transaction:
+            connection.execute("ROLLBACK")
+        raise
+    finally:
+        connection.close()
+
+
+def update_batch_status(batch_id, status, error=None, report_path=None, run_dir=None,
+                        snapshot_sha256=None):
+    if status not in STATUSES:
+        raise ValueError("Statut de lot invalide")
+    init_storage()
+    connection = get_connection()
+    try:
+        connection.execute(
+            """UPDATE batches SET status = ?, error = ?,
+                   report_path = COALESCE(?, report_path), run_dir = COALESCE(?, run_dir),
+                   snapshot_sha256 = COALESCE(?, snapshot_sha256),
+                   finished_at = CASE WHEN ? IN ('SUCCEEDED', 'FAILED')
+                                      THEN CURRENT_TIMESTAMP ELSE finished_at END
+               WHERE id = ?""",
+            (status, error, report_path, run_dir, snapshot_sha256, status, batch_id))
+    finally:
+        connection.close()
+
+
+def recover_interrupted_batches():
+    """Reprise après arrêt : un lot RUNNING (processus interrompu) redevient PENDING.
+
+    Les jeux restent réservés à leur lot (aucun mélange). Le worker retrouvera un éventuel run
+    déjà publié par son empreinte avant de réentraîner. Les lots FAILED ne sont jamais rejoués
+    automatiquement : une non-conformité inchangée ne se corrige pas par une boucle de retry.
+    """
+    init_storage()
+    connection = get_connection()
+    try:
+        cursor = connection.execute(
+            "UPDATE batches SET status = 'PENDING' WHERE status = 'RUNNING'")
+        return cursor.rowcount
+    finally:
+        connection.close()
 
 
 def get_status():
-    """Retourner les compteurs et les états des lots."""
+    """Jeux distincts acceptés, jeux en attente, seuil et états des lots."""
     init_storage()
-
-    with get_connection() as connection:
-        pending = connection.execute(
-            "SELECT COUNT(*) AS total FROM events WHERE batch_id IS NULL"
-        ).fetchone()["total"]
-
-        total_events = connection.execute(
-            "SELECT COUNT(*) AS total FROM events"
-        ).fetchone()["total"]
-
+    connection = get_connection()
+    try:
+        total = connection.execute("SELECT COUNT(*) FROM events").fetchone()[0]
         batches = connection.execute(
-            """
-            SELECT id AS batch_id, status, created_at,
-                   started_at, finished_at, error
-            FROM batches
-            ORDER BY id
-            """
-        ).fetchall()
-
+            """SELECT id AS batch_id, status, attempts, created_at, started_at, finished_at,
+                      error, run_dir FROM batches ORDER BY id""").fetchall()
         return {
-            "total_events": total_events,
-            "pending_games": pending,
-            "batches": [dict(batch) for batch in batches],
+            "accepted_games": total,
+            "pending_games": _pending_count(connection),
+            "threshold": BATCH_SIZE,
+            "batches": [dict(b) for b in batches],
         }
+    finally:
+        connection.close()

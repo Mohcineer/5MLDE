@@ -11,11 +11,17 @@ def normaliser_appid(appid, steam_store, steamspy, reviews):
     if store_data.get("steam_appid") != appid:
         raise ValueError("L'appid Steam Store ne correspond pas.")
 
+    if store_data.get("type", "game") != "game":
+        raise ValueError("L'application n'est pas un jeu (DLC, démo, outil…).")
+
     if steamspy.get("appid") != appid:
         raise ValueError("L'appid SteamSpy ne correspond pas.")
 
-    if store_data.get("name") != steamspy.get("name"):
-        raise ValueError("Les noms des jeux ne correspondent pas.")
+    # Les noms ne sont pas comparés : SteamSpy et Steam Store diffèrent souvent (™, ®, casse) ;
+    # l'identité est portée par l'appid, vérifié dans les trois sources.
+    inner = reviews.get("response", reviews)
+    if not isinstance(inner, dict) or inner.get("success", 1) not in (1, True):
+        raise ValueError("Réponse des avis non réussie.")
 
     if steamspy.get("owners") == "999999":
         raise ValueError("Identifiant SteamSpy caché ou invalide.")
@@ -165,7 +171,8 @@ def normaliser_statistiques(store_data):
 def normaliser_avis(reviews):
     """Vérifie le résumé des avis et calcule le pourcentage positif."""
 
-    response = reviews.get("response")
+    # Deux formes : /appreviews/<id>?json=1 (à plat) ou GetAppReviews/v1 (sous "response").
+    response = reviews.get("response", reviews)
 
     if not isinstance(response, dict):
         raise ValueError("Réponse des avis invalide.")
