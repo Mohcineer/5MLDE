@@ -60,9 +60,10 @@ def annotate_flow_run(**refs):
         run_id = flow_run.id
         if not run_id:
             return
-        existing = [t for t in (flow_run.tags or []) if t.split(":", 1)[0] not in refs]
-        tags = existing + [f"{key}:{value}" for key, value in refs.items() if value is not None]
         with get_client(sync_client=True) as client:
+            current = client.read_flow_run(run_id).tags or []  # tags COURANTS côté serveur, pas ceux du démarrage
+            existing = [t for t in current if t.split(":", 1)[0] not in refs]
+            tags = existing + [f"{key}:{value}" for key, value in refs.items() if value is not None]
             client.update_flow_run(run_id, tags=tags)
     except Exception:
         return
