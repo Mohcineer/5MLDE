@@ -14,8 +14,11 @@ from pathlib import Path
 import pandas as pd
 
 from src import tracking
+from prefect import task
+from prefect.cache_policies import NO_CACHE
+
 from src.orchestration import logger, step
-from src.client import AcquisitionError, SteamClient
+from src.client import AcquisitionError, SteamClient, TransientError
 from src.data_validation import (HISTORICAL_ORIGIN, snapshot_hash, validate_dataframe,
                                  validate_snapshot)
 from src.evaluation import resolve_run_dir
@@ -67,17 +70,31 @@ def normalize_new_rows(rows):
     return frame
 
 
-def collect_games(appids, client):
+def _only_transient(task_obj, task_run, state):
+    """Retry uniquement sur panne transitoire : jamais sur JSON/schéma invalide, 404 ou pause trop longue."""
+    error = state.result(raise_on_failure=False)
+    return isinstance(error, TransientError)
+
+
+# Seule couche de retry HTTP : 2 retries = 3 tentatives, le client n'en fait qu'une (budget inchangé).
+@task(name="Appel HTTP Steam", retries=2, retry_delay_seconds=[2, 5], retry_condition_fn=_only_transient,
+      timeout_seconds=90, cache_policy=NO_CACHE, persist_result=False)
+def fetch_source(client, source, appid):
+    return client.get(source, appid)
+
+
+def collect_games(appids, client, fetch=None):
     """Collecter 1 à 10 jeux. Un seul échec interrompt toute la collecte (pas de lot partiel)."""
     appids = list(dict.fromkeys(appids))
     if not 1 <= len(appids) <= MAX_PULL_GAMES:
         raise ValueError(f"La collecte PULL porte sur 1 à {MAX_PULL_GAMES} jeux (reçu {len(appids)}).")
+    fetch = fetch or (lambda source, appid: client.get(source, appid))
     rows, sources = [], []
     for appid in appids:
         try:
-            store = client.get("store", appid)
-            spy = client.get("spy", appid)
-            reviews = client.get("reviews", appid)
+            store = fetch("store", appid)
+            spy = fetch("spy", appid)
+            reviews = fetch("reviews", appid)
             rows.append(normaliser_ligne(appid, store, spy, reviews))
         except AcquisitionError:
             raise
@@ -168,9 +185,11 @@ def _acquire(config_file, config, ctx):
     if source_type == "api":
         acquisition = config.get("acquisition", {})
         cache_dir = _resolve(base_dir, acquisition.get("cache_dir", "cache"))
-        client = SteamClient(cache_dir, refresh=bool(acquisition.get("refresh", False)))
+        client = SteamClient(cache_dir, refresh=bool(acquisition.get("refresh", False)), max_attempts=1)
         try:
-            new_rows, sources = collect_games(acquisition.get("appids", []), client)
+            new_rows, sources = collect_games(
+                acquisition.get("appids", []), client,
+                fetch=lambda source, appid: fetch_source(client, source, appid))
         finally:
             client.close()
         if corpus is not None and set(new_rows["appid"]) & corpus["reserved_appids"]:

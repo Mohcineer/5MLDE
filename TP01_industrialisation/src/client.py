@@ -93,11 +93,13 @@ def reduce_response(source, appid, payload):
 class SteamClient:
     def __init__(self, cache_dir, refresh=False, transport=None, sleep=time.sleep,
                  clock=time.monotonic, now=lambda: datetime.now(timezone.utc),
-                 min_interval=MIN_INTERVAL):
+                 min_interval=MIN_INTERVAL, max_attempts=MAX_ATTEMPTS):
         self.cache_dir = Path(cache_dir)
         self.refresh = refresh
         self._sleep, self._clock, self._now = sleep, clock, now
         self.min_interval = min_interval
+        # Une seule couche de retry : à 1, l'appelant (tâche Prefect) rejoue ; budget total inchangé.
+        self.max_attempts = max_attempts
         self._last_call = None
         self.http_calls = 0
         self._http = httpx.Client(timeout=TIMEOUT, follow_redirects=True, transport=transport)
@@ -154,7 +156,7 @@ class SteamClient:
 
     def _request_json(self, url, params):
         last_error = None
-        for attempt in range(1, MAX_ATTEMPTS + 1):
+        for attempt in range(1, self.max_attempts + 1):
             self._throttle()
             self.http_calls += 1
             try:
@@ -176,9 +178,9 @@ class SteamClient:
                         return response.json()
                     except ValueError as exc:
                         raise PermanentError(f"{url} : réponse non JSON.") from exc
-            if attempt < MAX_ATTEMPTS:
-                self._sleep(delay)
-        raise TransientError(f"{url} : {last_error} après {MAX_ATTEMPTS} tentatives.")
+            if attempt < self.max_attempts or self.max_attempts == 1:
+                self._sleep(delay)  # avec 1 tentative : respecter Retry-After avant que l'appelant rejoue
+        raise TransientError(f"{url} : {last_error} après {self.max_attempts} tentative(s).")
 
     def get(self, source, appid):
         """Réponse réduite d'une source, depuis le cache ou le réseau."""
