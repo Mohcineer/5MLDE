@@ -45,3 +45,24 @@ def record_flow_info(mlflow_run_id=None):
         return
     info = {**runtime_ids(), "mlflow_run_id": mlflow_run_id}
     Path(target).write_text(json.dumps(info), encoding="utf-8")
+
+
+def annotate_flow_run(**refs):
+    """Exposer des références (mode, batch_id, run MLflow, étape en erreur) dans les TAGS du flow run.
+
+    Le modèle de notification d'une automation ne voit pas les variables du processus : seules les
+    métadonnées du run lui sont accessibles. Sans contexte Prefect, ou si l'API est injoignable,
+    l'annotation est ignorée (elle ne doit jamais faire échouer ni masquer l'échec du pipeline).
+    """
+    try:
+        from prefect.client.orchestration import get_client
+        from prefect.runtime import flow_run
+        run_id = flow_run.id
+        if not run_id:
+            return
+        existing = [t for t in (flow_run.tags or []) if t.split(":", 1)[0] not in refs]
+        tags = existing + [f"{key}:{value}" for key, value in refs.items() if value is not None]
+        with get_client(sync_client=True) as client:
+            client.update_flow_run(run_id, tags=tags)
+    except Exception:
+        return

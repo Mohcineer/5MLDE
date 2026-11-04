@@ -17,7 +17,7 @@ from src import tracking
 from prefect import task
 from prefect.cache_policies import NO_CACHE
 
-from src.orchestration import logger, record_flow_info, step
+from src.orchestration import annotate_flow_run, logger, record_flow_info, step
 from src.client import AcquisitionError, SteamClient, TransientError
 from src.data_validation import (HISTORICAL_ORIGIN, snapshot_hash, validate_dataframe,
                                  validate_snapshot)
@@ -268,6 +268,8 @@ def load_data(config_path):
     # Le run est ouvert AVANT l'acquisition ; serveur injoignable -> erreur explicite ici.
     ctx = tracking.open_run(config, config_file, workflow) if tracking.enabled(config) else None
     record_flow_info(ctx["run_id"] if ctx else None)
+    annotate_flow_run(workflow=workflow, mlflow_run_id=ctx["run_id"] if ctx else None,
+                      batch_id=config.get("tracking", {}).get("batch_id"))
     log = logger()
     log.info("Ingestion : workflow=%s, config=%s, run MLflow=%s", workflow, config_file,
              ctx["run_id"] if ctx else "indisponible (suivi désactivé)")

@@ -271,6 +271,8 @@ def fail(ctx, stage_name, exc):
     info = {"run_id": ctx["run_id"], "failed_stage": stage_name,
             "error_type": type(exc).__name__, "error": str(exc)[:2000],
             "date": datetime.now(timezone.utc).isoformat(), "uri": ctx["uri"]}
+    from src.orchestration import annotate_flow_run
+    annotate_flow_run(failed_stage=stage_name)  # visible dans le message d'alerte
     try:
         set_tags(ctx, {"failed_stage": stage_name, "error_type": info["error_type"],
                        "error": info["error"][:MAX_PARAM]})
