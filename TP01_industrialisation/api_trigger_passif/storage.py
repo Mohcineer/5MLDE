@@ -182,7 +182,8 @@ def claim_next_batch():
             return None
         connection.execute(
             """UPDATE batches SET status = 'RUNNING', attempts = attempts + 1,
-                   started_at = CURRENT_TIMESTAMP, error = NULL WHERE id = ?""", (row["id"],))
+                   started_at = CURRENT_TIMESTAMP, error = NULL, failure_kind = NULL
+               WHERE id = ?""", (row["id"],))
         connection.execute("COMMIT")
         return row["id"]
     except BaseException:
