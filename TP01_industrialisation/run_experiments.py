@@ -30,6 +30,7 @@ def run_variant(base_config, label):
     config = json.loads(json.dumps(base_config))
     config["models"] = VARIANTS[label]
     config["validation"] = {"dir": "validation"}
+    config["output"] = {**config.get("output", {}), "run_dir": f"runs/{config.get('tracking', {}).get('publication_prefix', 'pull')}-{label}"}
     publication = f"{config.get('tracking', {}).get('publication_prefix', 'pull')}-{label}"
     config["tracking"] = {**config.get("tracking", {}), "enabled": True, "publication_id": publication,
                           "run_name": publication}
