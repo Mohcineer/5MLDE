@@ -2,7 +2,10 @@
 
 Premier passage : zéro retry, pas de cache, pas de persistance de résultat (voir partie 2 de l'énoncé).
 """
+import json
 import logging
+import os
+from pathlib import Path
 
 from prefect import get_run_logger, task
 from prefect.cache_policies import NO_CACHE
@@ -29,3 +32,16 @@ def runtime_ids():
         return {"flow_run_id": flow_run.id, "task_run_id": task_run.id}
     except Exception:
         return {"flow_run_id": None, "task_run_id": None}
+
+
+def record_flow_info(mlflow_run_id=None):
+    """Écrire `flow_run_id` / `mlflow_run_id` si l'appelant l'a demandé (`STEAM_FLOW_INFO`).
+
+    Le worker PUSH lance le flow dans un sous-processus : ce fichier est le seul canal fiable pour
+    persister les identifiants dans le job, y compris quand le flow échoue juste après.
+    """
+    target = os.getenv("STEAM_FLOW_INFO")
+    if not target:
+        return
+    info = {**runtime_ids(), "mlflow_run_id": mlflow_run_id}
+    Path(target).write_text(json.dumps(info), encoding="utf-8")

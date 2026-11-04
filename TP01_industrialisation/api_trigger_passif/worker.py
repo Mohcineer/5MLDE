@@ -18,13 +18,16 @@ def process_pending_batches():
             result = training_trigger.trigger_training(batch)
         except training_trigger.TrainingFailed as exc:
             storage.update_batch_status(
-                batch_id, "FAILED", error=str(exc), report_path=exc.report_path)
+                batch_id, "FAILED", error=str(exc), report_path=exc.report_path,
+                flow_run_id=exc.flow_run_id, mlflow_run_id=exc.mlflow_run_id, failure_kind=exc.kind)
         except Exception as exc:  # erreur imprévue : lot FAILED, diagnostic conservé, pas de boucle
-            storage.update_batch_status(batch_id, "FAILED", error=f"{type(exc).__name__}: {exc}")
+            storage.update_batch_status(batch_id, "FAILED", error=f"{type(exc).__name__}: {exc}",
+                                        failure_kind="unexpected")
         else:
             storage.update_batch_status(
                 batch_id, "SUCCEEDED", run_dir=result["run_dir"],
-                snapshot_sha256=result["snapshot_sha256"])
+                snapshot_sha256=result["snapshot_sha256"], flow_run_id=result.get("flow_run_id"),
+                mlflow_run_id=result.get("mlflow_run_id"))
         processed += 1
     return processed
 

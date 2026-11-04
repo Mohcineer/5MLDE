@@ -28,7 +28,10 @@ CREATE TABLE IF NOT EXISTS batches (
     error TEXT,
     report_path TEXT,
     run_dir TEXT,
-    snapshot_sha256 TEXT
+    snapshot_sha256 TEXT,
+    flow_run_id TEXT,
+    mlflow_run_id TEXT,
+    failure_kind TEXT
 );
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -65,6 +68,10 @@ def init_storage():
     connection = get_connection()
     try:
         connection.executescript(SCHEMA)
+        existing = {row["name"] for row in connection.execute("PRAGMA table_info(batches)")}
+        for column in ("flow_run_id", "mlflow_run_id", "failure_kind"):  # bases créées avant le TP4
+            if column not in existing:
+                connection.execute(f"ALTER TABLE batches ADD COLUMN {column} TEXT")
     finally:
         connection.close()
     _initialized.add(key)
@@ -187,7 +194,8 @@ def claim_next_batch():
 
 
 def update_batch_status(batch_id, status, error=None, report_path=None, run_dir=None,
-                        snapshot_sha256=None):
+                        snapshot_sha256=None, flow_run_id=None, mlflow_run_id=None,
+                        failure_kind=None):
     if status not in STATUSES:
         raise ValueError("Statut de lot invalide")
     init_storage()
@@ -197,10 +205,30 @@ def update_batch_status(batch_id, status, error=None, report_path=None, run_dir=
             """UPDATE batches SET status = ?, error = ?,
                    report_path = COALESCE(?, report_path), run_dir = COALESCE(?, run_dir),
                    snapshot_sha256 = COALESCE(?, snapshot_sha256),
+                   flow_run_id = COALESCE(?, flow_run_id),
+                   mlflow_run_id = COALESCE(?, mlflow_run_id),
+                   failure_kind = ?,
                    finished_at = CASE WHEN ? IN ('SUCCEEDED', 'FAILED')
                                       THEN CURRENT_TIMESTAMP ELSE finished_at END
                WHERE id = ?""",
-            (status, error, report_path, run_dir, snapshot_sha256, status, batch_id))
+            (status, error, report_path, run_dir, snapshot_sha256, flow_run_id, mlflow_run_id,
+             failure_kind, status, batch_id))
+    finally:
+        connection.close()
+
+
+def requeue_failed_batch(batch_id):
+    """Reprise contrôlée, demandée explicitement : FAILED -> PENDING (jamais automatique).
+
+    Les jeux restent ceux du lot ; le déclencheur reconnaît un run déjà publié par son empreinte et
+    la publication MLflow retrouve ses versions par `publication_id` (aucun doublon).
+    """
+    init_storage()
+    connection = get_connection()
+    try:
+        cursor = connection.execute(
+            "UPDATE batches SET status = 'PENDING' WHERE id = ? AND status = 'FAILED'", (batch_id,))
+        return cursor.rowcount == 1
     finally:
         connection.close()
 
@@ -230,7 +258,8 @@ def get_status():
         total = connection.execute("SELECT COUNT(*) FROM events").fetchone()[0]
         batches = connection.execute(
             """SELECT id AS batch_id, status, attempts, created_at, started_at, finished_at,
-                      error, run_dir FROM batches ORDER BY id""").fetchall()
+                      error, run_dir, flow_run_id, mlflow_run_id, failure_kind
+               FROM batches ORDER BY id""").fetchall()
         return {
             "accepted_games": total,
             "pending_games": _pending_count(connection),
