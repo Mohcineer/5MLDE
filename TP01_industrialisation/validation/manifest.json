@@ -1,0 +1,43 @@
+{
+  "protocol_id": "steam-validation-v1",
+  "created_utc": "2026-11-04T10:23:39.024504+00:00",
+  "seed": 2026,
+  "source_csv": "games.csv",
+  "source_sha256": "7eec2ff4e6f1389bfb74308c8de1206fee2a94f51120895c2cf7fce84146312f",
+  "source_rows": 94948,
+  "files": {
+    "validation.csv": {
+      "rows": 9494,
+      "sha256": "1a61399aabb22592a9fc7985568bd42435a7fa629031bf678de32e38323b262e",
+      "regression_eligible": 5639,
+      "classification_eligible": 8092
+    },
+    "final_test.csv": {
+      "rows": 9494,
+      "sha256": "4d0cb97c0edf477208c85744c09f83d3802a080c0108de2b9e8028825ee34462",
+      "regression_eligible": 5496,
+      "classification_eligible": 8219
+    }
+  },
+  "regression_filter": "pct_pos_total in [0,100] et num_reviews_total >= 10",
+  "classification_labels": [
+    "0 - 20000",
+    "20000 - 50000",
+    "50000 - 100000",
+    "100000 - 200000",
+    "200000 - 500000",
+    "500000 - 1000000",
+    "1000000 - 2000000",
+    "2000000 - 5000000",
+    "5000000 - 10000000",
+    "10000000 - 20000000",
+    "20000000 - 50000000",
+    "50000000 - 100000000"
+  ],
+  "classification_excluded": {
+    "200000000 - 500000000": 1,
+    "100000000 - 200000000": 1,
+    "0 - 0": "exclue"
+  },
+  "note": "validation.csv = sélection/qualification (n'est plus un test indépendant) ; final_test.csv = bilan final sans ajustement de seuils."
+}

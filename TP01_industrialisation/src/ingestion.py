@@ -5,6 +5,7 @@
 Le contrat stable entre acquisition et entraînement est un DataFrame aux colonnes du CSV TP1
 (+ `origin`, colonne de provenance qui n'est jamais une feature). La validation GX est la dernière
 étape de `load_data` : ce qui est retourné est exactement ce qui a été validé (pas de relecture).
+Avec `tracking.enabled`, le run MLflow est ouvert avant l'acquisition (voir src/tracking.py).
 """
 import hashlib
 import json
@@ -12,6 +13,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from src import tracking
 from src.client import AcquisitionError, SteamClient
 from src.data_validation import (HISTORICAL_ORIGIN, snapshot_hash, validate_dataframe,
                                  validate_snapshot)
@@ -22,6 +24,7 @@ REAL_ORIGIN = "steam-store+steamspy"
 NUMERIC_COLUMNS = ["price", "required_age", "dlc_count", "achievements", "positive",
                    "negative", "pct_pos_total", "num_reviews_total"]
 MAX_PULL_GAMES = 10
+WORKFLOWS = {"csv": "csv-baseline", "api": "pull", "push_batch": "push"}
 
 
 def _resolve(base_dir, path):
@@ -100,11 +103,27 @@ def upsert_snapshot(base, new_rows):
     return snapshot[columns], {"added": added, "updated": updated}
 
 
+# --- corpus de validation réservé (TP3) ---------------------------------------------------------
+
+def load_validation_corpus(config, base_dir):
+    """Corpus figé de qualification : empreintes vérifiées, appids réservés exclus de l'apprentissage."""
+    settings = config.get("validation")
+    if not settings:
+        return None
+    directory = _resolve(base_dir, settings.get("dir", "validation"))
+    manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
+    for name, info in manifest["files"].items():
+        if tracking.sha256_file(directory / name) != info["sha256"]:
+            raise ValueError(f"Corpus de validation modifié (empreinte différente) : {name}")
+    validation = pd.read_csv(directory / "validation.csv")
+    final = pd.read_csv(directory / "final_test.csv")
+    return {"validation": validation, "manifest": manifest, "dir": directory,
+            "reserved_appids": set(validation["appid"]) | set(final["appid"])}
+
+
 # --- fonction mère -----------------------------------------------------------------------------
 
-def load_data(config_path):
-    """Charger la configuration, acquérir les données et les valider avant tout prétraitement."""
-    config_file, config = read_config(config_path)
+def _acquire(config_file, config, ctx):
     base_dir = config_file.parent
     source = config.get("source", {})
     output = config.get("output", {})
@@ -122,6 +141,8 @@ def load_data(config_path):
         "diagnostics_dir": _resolve(base_dir, output.get("diagnostics_dir", "diagnostics")),
     }
     paths["run_dir"] = resolve_run_dir(config, paths)
+    if ctx is not None:
+        ctx["diagnostics_dir"] = paths["diagnostics_dir"]
     if paths["run_dir"].exists():
         raise FileExistsError(f"Le dossier de run existe déjà : {paths['run_dir']}")
 
@@ -129,6 +150,19 @@ def load_data(config_path):
     data = read_csv_source(csv_path)
     provenance["base_sha256"] = hashlib.sha256(csv_path.read_bytes()).hexdigest()
     provenance["base_rows"] = len(data)
+
+    corpus = load_validation_corpus(config, base_dir)
+    if corpus is not None:
+        reserved = corpus["reserved_appids"]
+        before = len(data)
+        data = data[~data["appid"].isin(reserved)].reset_index(drop=True)
+        provenance.update(
+            protocol_id=corpus["manifest"]["protocol_id"],
+            validation_corpus_sha256=corpus["manifest"]["files"]["validation.csv"]["sha256"],
+            reserved_appids=len(reserved), excluded_reserved=before - len(data))
+        validate_dataframe(corpus["validation"].assign(origin=HISTORICAL_ORIGIN),
+                           "steam_historical_v1", paths["diagnostics_dir"],
+                           source="corpus de validation")
 
     if source_type == "api":
         acquisition = config.get("acquisition", {})
@@ -138,6 +172,8 @@ def load_data(config_path):
             new_rows, sources = collect_games(acquisition.get("appids", []), client)
         finally:
             client.close()
+        if corpus is not None and set(new_rows["appid"]) & corpus["reserved_appids"]:
+            raise AcquisitionError("Un appid collecté est réservé au corpus de validation.")
         # Nouveaux jeux validés AVANT l'upsert (règles strictes), puis snapshot complet.
         validate_dataframe(new_rows, "steam_new_games_v1", paths["diagnostics_dir"],
                            source="collecte PULL avant upsert")
@@ -153,5 +189,65 @@ def load_data(config_path):
     provenance["snapshot_sha256"] = snapshot_hash(data)
     provenance["snapshot_rows"] = len(data)
 
-    return {"data": data, "config": config, "paths": paths,
-            "validation": reports, "provenance": provenance}
+    return {"data": data, "config": config, "paths": paths, "validation": reports,
+            "provenance": provenance, "validation_corpus": corpus, "tracking": ctx}
+
+
+def _track_ingestion(ctx, result, config):
+    """Configuration, origine, snapshot récupérable, rapports de validation, schéma."""
+    provenance, paths, data = result["provenance"], result["paths"], result["data"]
+    tracking_cfg = config.get("tracking", {})
+    publication = tracking_cfg.get("publication_id") or (
+        f"{ctx['workflow']}-{provenance['snapshot_sha256'][:16]}-"
+        f"{tracking.sha256_text(json.dumps(config, sort_keys=True))[:8]}")
+    ctx["publication_id"] = publication
+    is_pull = provenance["source_type"] == "api"
+    tracking.log_params(ctx, {
+        "source.type": provenance["source_type"], "random_state": config.get("random_state"),
+        "test_size": config.get("test_size"),
+        "cache.refresh": config.get("acquisition", {}).get("refresh") if is_pull else None,
+        "acquisition.appids": config.get("acquisition", {}).get("appids") if is_pull else None,
+        "thresholds": json.dumps(config.get("thresholds", {})),
+    })
+    tracking.set_tags(ctx, {
+        "publication_id": publication, "snapshot_sha256": provenance["snapshot_sha256"],
+        "base_sha256": provenance["base_sha256"],
+        "origins": json.dumps(provenance["origins"]),
+        "protocol_id": provenance.get("protocol_id"),
+        "validation_corpus_sha256": provenance.get("validation_corpus_sha256"),
+        "ge_suites": ",".join(sorted({r["suite"] for r in result["validation"]})),
+        "synthetic": str("synthetic-course" in provenance["origins"]).lower(),
+    })
+    tracking.log_metrics(ctx, {
+        "data.rows_base": provenance["base_rows"], "data.rows_snapshot": len(data),
+        "data.rows_excluded_reserved": provenance.get("excluded_reserved", 0),
+        "data.rows_added": len(provenance.get("added", [])),
+        "data.rows_updated": len(provenance.get("updated", [])),
+    })
+    tracking.log_json(ctx, config, "config_resolved.json")
+    tracking.log_json(ctx, provenance, "provenance.json")
+    tracking.log_json(ctx, {"columns": {c: str(t) for c, t in data.dtypes.items()}},
+                      "schema.json")
+    for report in result["validation"]:
+        if report.get("report_file"):
+            tracking.log_file(ctx, report["report_file"], "validation")
+    meta = paths["source"].parent / "events_meta.json"
+    if meta.exists():
+        tracking.log_file(ctx, meta, "provenance")
+    snapshot_sha = tracking.archive_dataframe(ctx, data, "snapshot.csv.gz", "data")
+    tracking.set_tags(ctx, {"snapshot_file_sha256": snapshot_sha})
+    tracking.log_dataset(ctx, data, f"snapshot-{provenance['snapshot_sha256'][:12]}",
+                         "snapshot", paths["source"])
+
+
+def load_data(config_path):
+    """Charger la configuration, acquérir les données et les valider avant tout prétraitement."""
+    config_file, config = read_config(config_path)
+    workflow = WORKFLOWS.get(config.get("source", {}).get("type"), "csv-baseline")
+    # Le run est ouvert AVANT l'acquisition ; serveur injoignable -> erreur explicite ici.
+    ctx = tracking.open_run(config, config_file, workflow) if tracking.enabled(config) else None
+    with tracking.stage(ctx, "ingestion"):
+        result = _acquire(config_file, config, ctx)
+        if ctx is not None:
+            _track_ingestion(ctx, result, config)
+    return result

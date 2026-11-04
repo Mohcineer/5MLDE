@@ -12,10 +12,11 @@ import joblib
 import numpy as np
 import pandas as pd
 import sklearn
-from sklearn.metrics import (accuracy_score, classification_report, f1_score,
-                             mean_absolute_error, r2_score)
+from sklearn.metrics import (accuracy_score, classification_report, confusion_matrix, f1_score,
+                             mean_absolute_error, mean_squared_error, r2_score)
 
-from src.preprocessing import RAW_FEATURE_COLUMNS
+from src import tracking
+from src.preprocessing import (CLASSIFICATION_TARGET, RAW_FEATURE_COLUMNS, eligible_regression)
 
 
 def sha256_file(path):
@@ -59,6 +60,53 @@ def _classification_metrics(info):
     }
 
 
+def _validation_metrics(task, info, corpus, config):
+    """Qualification commune : même corpus réservé pour toutes les variantes, baseline incluse."""
+    frame = corpus["validation"]
+    if task == "regression":
+        frame = eligible_regression(frame, config.get("thresholds", {}).get("regression_min_reviews", 10))
+        y = pd.to_numeric(frame[info["target"]])
+        x = frame[RAW_FEATURE_COLUMNS]
+        pred = np.clip(info["model"].predict(x), 0, 100)
+        base = info["baseline"].predict(x)
+        return {"n": len(frame), "mae": float(mean_absolute_error(y, pred)),
+                "rmse": float(np.sqrt(mean_squared_error(y, pred))), "r2": float(r2_score(y, pred)),
+                "baseline_mae": float(mean_absolute_error(y, base)),
+                "baseline_rmse": float(np.sqrt(mean_squared_error(y, base))),
+                "baseline_r2": float(r2_score(y, base))}
+    labels = list(corpus["manifest"]["classification_labels"])
+    frame = frame[frame[CLASSIFICATION_TARGET].isin(labels)]
+    y, x = frame[info["target"]], frame[RAW_FEATURE_COLUMNS]
+    pred, base = info["model"].predict(x), info["baseline"].predict(x)
+    return {"n": len(frame), "labels": labels,
+            "accuracy": float(accuracy_score(y, pred)),
+            "f1_macro": float(f1_score(y, pred, labels=labels, average="macro", zero_division=0)),
+            "baseline_accuracy": float(accuracy_score(y, base)),
+            "baseline_f1_macro": float(f1_score(y, base, labels=labels, average="macro", zero_division=0)),
+            "per_class": classification_report(y, pred, labels=labels, zero_division=0, output_dict=True),
+            "confusion_matrix": confusion_matrix(y, pred, labels=labels).tolist(),
+            "classes_absent_from_train": sorted(set(labels) - set(info["train"][info["target"]]))}
+
+
+def _log_run_results(ctx, tasks, metrics, validation, corpus):
+    """Métriques de test interne et de validation commune, séparées ; modèles rechargeables."""
+    for task, info in tasks.items():
+        scalar = lambda d: {k: v for k, v in d.items() if isinstance(v, (int, float))}
+        tracking.log_metrics(ctx, {f"{task}.test.{k}": v for k, v in scalar(metrics[task]).items()})
+        if task in validation:
+            tracking.log_metrics(ctx, {f"{task}.validation.{k}": v
+                                       for k, v in scalar(validation[task]).items()})
+        example = info["test"][RAW_FEATURE_COLUMNS].head(5)
+        uri = tracking.log_model(ctx, info["model"], f"{task}-model", example)
+        tracking.set_tags(ctx, {f"{task}.model_uri": uri})
+    tracking.log_json(ctx, metrics, "reports/test_metrics.json")
+    if validation:
+        tracking.log_json(ctx, {"protocol_id": corpus["manifest"].get("protocol_id"),
+                                "validation_corpus_sha256":
+                                    corpus["manifest"]["files"]["validation.csv"]["sha256"],
+                                "results": validation}, "reports/validation_metrics.json")
+
+
 def resolve_run_dir(config, paths):
     """Dossier de run : `output.run_dir` explicite, sinon horodaté sous `runs_dir`."""
     explicit = config.get("output", {}).get("run_dir")
@@ -71,6 +119,14 @@ def resolve_run_dir(config, paths):
 
 def evaluate_models(trained_models):
     """Prédire sur test, comparer aux baselines, publier les artefacts après succès des deux tâches."""
+    ctx = trained_models.get("tracking")
+    with tracking.stage(ctx, "evaluation"):
+        result = _evaluate(trained_models, ctx)
+    tracking.finish(ctx)
+    return result
+
+
+def _evaluate(trained_models, ctx):
     config, paths = trained_models["config"], trained_models["paths"]
     tasks = trained_models["tasks"]
 
@@ -78,6 +134,11 @@ def evaluate_models(trained_models):
         "regression": _regression_metrics(tasks["regression"]),
         "classification": _classification_metrics(tasks["classification"]),
     }
+
+    corpus = trained_models.get("validation_corpus")
+    validation = ({task: _validation_metrics(task, info, corpus, config) for task, info in tasks.items()}
+                  if corpus is not None else {})
+    _log_run_results(ctx, tasks, metrics, validation, corpus)
 
     run_dir = Path(paths.get("run_dir") or resolve_run_dir(config, paths))
     if run_dir.exists():

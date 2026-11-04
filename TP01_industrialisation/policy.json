@@ -1,0 +1,19 @@
+{
+  "policy_id": "steam-policy-v1",
+  "protocol_id": "steam-validation-v1",
+  "validation_corpus_sha256": "1a61399aabb22592a9fc7985568bd42435a7fa629031bf678de32e38323b262e",
+  "objective": "Pedagogique : battre nettement la baseline sur le corpus de validation commun.",
+  "allowed_origins": ["csv-baseline", "pull"],
+  "demo_workflows": ["push"],
+  "regression": {
+    "primary": {"metric": "mae", "direction": "lower", "max_absolute": 13.0,
+                "min_gain_vs_baseline": 0.5},
+    "secondary": {"metric": "r2", "direction": "higher", "min": 0.05}
+  },
+  "classification": {
+    "primary": {"metric": "f1_macro", "direction": "higher", "min_absolute": 0.25,
+                "min_gain_vs_baseline": 0.05},
+    "secondary": {"metric": "accuracy", "direction": "higher", "min_gain_vs_baseline": 0.0}
+  },
+  "technical": ["reload_ok", "metrics_finite", "same_protocol"]
+}

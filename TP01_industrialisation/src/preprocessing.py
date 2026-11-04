@@ -23,6 +23,8 @@ from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer, OneHotEncoder
 
+from src import tracking
+
 OWNERS_EXCLUDED = "0 - 0"
 REGRESSION_TARGET = "pct_pos_total"
 CLASSIFICATION_TARGET = "estimated_owners"
@@ -199,12 +201,68 @@ def _split_task(subset, target, config, stratify):
     return train, test
 
 
+PREPROCESSING_VERSION = "features-v1"
+
+
 def preprocess_data(data):
     """Contrôler doublons et colonnes, filtrer, séparer train/test pour les deux tâches.
 
     L'ajustement (médianes, catégories rares) se fait ensuite sur train seul, dans le pipeline
     sauvegardé avec chaque modèle (voir training.py).
     """
+    ctx = data.get("tracking")
+    with tracking.stage(ctx, "preprocessing"):
+        prepared = _preprocess(data)
+        if ctx is not None:
+            _track_preprocessing(ctx, prepared, data.get("validation_corpus"))
+    return prepared
+
+
+def _track_preprocessing(ctx, prepared, corpus):
+    """Filtres, partitions, effectifs et jeux d'entrée du run (sans fuite : rien n'est appris ici)."""
+    config = prepared["config"]
+    thresholds = config.get("thresholds", {})
+    tracking.set_tags(ctx, {"preprocessing_version": PREPROCESSING_VERSION})
+    tracking.log_params(ctx, {
+        "preprocessing.version": PREPROCESSING_VERSION,
+        "regression.filter": (f"pct_pos_total in [0,100] et num_reviews_total >= "
+                              f"{thresholds.get('regression_min_reviews', 10)}"),
+        "classification.filter": (f"estimated_owners != '0 - 0' et classes >= "
+                                  f"{thresholds.get('classification_min_class_count', 5)} jeux"),
+        "features": ",".join(NUMERIC_FEATURES + CATEGORICAL_FEATURES),
+    })
+    tracking.log_json(ctx, {
+        "version": PREPROCESSING_VERSION, "numeric_features": NUMERIC_FEATURES,
+        "categorical_features": CATEGORICAL_FEATURES, "imputation": "médiane du train + indicateurs",
+        "encoding": "OneHot, min_frequency=10, infrequent_if_exist",
+        "excluded_from_features": ["appid", "cibles", "num_reviews_total", "positive", "negative",
+                                   "origin"],
+    }, "preprocessing.json")
+    for task, info in prepared["tasks"].items():
+        train, test = info["train"], info["test"]
+        tracking.log_metrics(ctx, {
+            f"{task}.n_eligible": len(train) + len(test), f"{task}.n_train": len(train),
+            f"{task}.n_test": len(test),
+            f"{task}.n_excluded_classes": len(info["excluded_classes"]),
+        })
+        split = pd.concat([pd.DataFrame({"appid": train["appid"].to_numpy(), "set": "train"}),
+                           pd.DataFrame({"appid": test["appid"].to_numpy(), "set": "test"})])
+        tracking.archive_dataframe(ctx, split, f"split_{task}.csv.gz", "partitions")
+        tracking.log_dataset(ctx, train, f"{task}-train", "training", "snapshot",
+                             targets=info["target"])
+        if info["excluded_classes"]:
+            tracking.log_json(ctx, info["excluded_classes"], f"partitions/{task}_excluded_classes.json")
+        if corpus is not None:
+            subset = (eligible_regression(corpus["validation"],
+                                          thresholds.get("regression_min_reviews", 10))
+                      if task == "regression" else
+                      corpus["validation"][corpus["validation"][CLASSIFICATION_TARGET].isin(
+                          corpus["manifest"]["classification_labels"])])
+            tracking.log_dataset(ctx, subset, f"{task}-validation", "validation",
+                                 corpus["dir"] / "validation.csv", targets=info["target"])
+
+
+def _preprocess(data):
     frame = data["data"]
     config = data["config"]
     thresholds = config.get("thresholds", {})
@@ -234,6 +292,8 @@ def preprocess_data(data):
         "validation": data.get("validation"),
         "snapshot": frame,
         "provenance": data.get("provenance"),
+        "tracking": data.get("tracking"),
+        "validation_corpus": data.get("validation_corpus"),
         "tasks": {
             "regression": {
                 "target": REGRESSION_TARGET, "train": reg_train, "test": reg_test,

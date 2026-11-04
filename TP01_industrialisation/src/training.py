@@ -1,7 +1,10 @@
 """Entraînement : forêt + baseline par tâche, prétraitement ajusté sur train uniquement."""
+import time
+
 from sklearn.dummy import DummyClassifier, DummyRegressor
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 
+from src import tracking
 from src.preprocessing import RAW_FEATURE_COLUMNS, make_pipeline
 
 DEFAULT_PARAMS = {
@@ -16,10 +19,17 @@ def _params(config, task):
 
 def train_models(prepared_data):
     """Ajuster les deux modèles et leurs baselines sur train ; conserver test et configuration."""
+    ctx = prepared_data.get("tracking")
+    with tracking.stage(ctx, "training"):
+        return _train(prepared_data, ctx)
+
+
+def _train(prepared_data, ctx):
     config = prepared_data["config"]
     seed = config.get("random_state", 42)
     trained = {}
     for task, info in prepared_data["tasks"].items():
+        started = time.perf_counter()
         train = info["train"]
         x_train, y_train = train[RAW_FEATURE_COLUMNS], train[info["target"]]
         if task == "regression":
@@ -34,10 +44,15 @@ def train_models(prepared_data):
         baseline.fit(x_train, y_train)
         trained[task] = {**info, "model": model, "baseline": baseline,
                          "params": _params(config, task)}
+        tracking.log_params(ctx, {f"{task}.{key}": value for key, value in _params(config, task).items()}
+                            | {f"{task}.random_state": seed, f"{task}.algorithm": type(model[-1]).__name__,
+                               f"{task}.baseline": type(baseline[-1]).__name__})
+        tracking.log_metrics(ctx, {f"{task}.duration.training_s": time.perf_counter() - started})
     return {
         "config": config, "paths": prepared_data["paths"],
         "validation": prepared_data.get("validation"),
         "snapshot": prepared_data["snapshot"],
         "provenance": prepared_data.get("provenance"),
+        "tracking": ctx, "validation_corpus": prepared_data.get("validation_corpus"),
         "tasks": trained,
     }
