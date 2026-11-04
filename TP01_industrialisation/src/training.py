@@ -5,6 +5,7 @@ from sklearn.dummy import DummyClassifier, DummyRegressor
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 
 from src import tracking
+from src.orchestration import logger, step
 from src.preprocessing import RAW_FEATURE_COLUMNS, make_pipeline
 
 DEFAULT_PARAMS = {
@@ -17,9 +18,11 @@ def _params(config, task):
     return {**DEFAULT_PARAMS[task], **config.get("models", {}).get(task, {})}
 
 
+@step("Entraînement")
 def train_models(prepared_data):
     """Ajuster les deux modèles et leurs baselines sur train ; conserver test et configuration."""
     ctx = prepared_data.get("tracking")
+    logger().info("Entraînement des deux modèles (graine %s)", prepared_data["config"].get("random_state", 42))
     with tracking.stage(ctx, "training"):
         return _train(prepared_data, ctx)
 

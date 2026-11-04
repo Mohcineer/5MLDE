@@ -24,6 +24,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer, OneHotEncoder
 
 from src import tracking
+from src.orchestration import logger, step
 
 OWNERS_EXCLUDED = "0 - 0"
 REGRESSION_TARGET = "pct_pos_total"
@@ -204,6 +205,7 @@ def _split_task(subset, target, config, stratify):
 PREPROCESSING_VERSION = "features-v1"
 
 
+@step("Prétraitement")
 def preprocess_data(data):
     """Contrôler doublons et colonnes, filtrer, séparer train/test pour les deux tâches.
 
@@ -211,8 +213,11 @@ def preprocess_data(data):
     sauvegardé avec chaque modèle (voir training.py).
     """
     ctx = data.get("tracking")
+    logger().info("Prétraitement : filtres des cibles, partitions train/test")
     with tracking.stage(ctx, "preprocessing"):
         prepared = _preprocess(data)
+        logger().info("Prétraitement terminé : %s", {t: (len(i["train"]), len(i["test"]))
+                                                    for t, i in prepared["tasks"].items()})
         if ctx is not None:
             _track_preprocessing(ctx, prepared, data.get("validation_corpus"))
     return prepared

@@ -115,6 +115,10 @@ def open_run(config, config_file, workflow, run_name=None):
             "config_file": str(config_file),
             **code_state(),
         }
+        from src.orchestration import runtime_ids
+        ids = runtime_ids()  # lien MLflow -> Prefect ; absent hors d'un flow
+        if ids["flow_run_id"]:
+            tags["prefect_flow_run_id"] = str(ids["flow_run_id"])
         if batch_id is not None:
             tags["batch_id"] = str(batch_id)
         if tracking.get("publication_id"):

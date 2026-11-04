@@ -1,10 +1,13 @@
 """Orchestration uniquement : la logique métier appartient aux quatre modules."""
+from prefect import flow
+
 from src.ingestion import load_data
 from src.preprocessing import preprocess_data
 from src.training import train_models
 from src.evaluation import evaluate_models
 
 
+@flow(name="Pipeline Steam", retries=0, log_prints=True)
 def main(config_path):
     data = load_data(config_path)
     prepared_data = preprocess_data(data)

@@ -14,6 +14,7 @@ from pathlib import Path
 import pandas as pd
 
 from src import tracking
+from src.orchestration import logger, step
 from src.client import AcquisitionError, SteamClient
 from src.data_validation import (HISTORICAL_ORIGIN, snapshot_hash, validate_dataframe,
                                  validate_snapshot)
@@ -240,14 +241,20 @@ def _track_ingestion(ctx, result, config):
                          "snapshot", paths["source"])
 
 
+@step("Ingestion")
 def load_data(config_path):
     """Charger la configuration, acquérir les données et les valider avant tout prétraitement."""
     config_file, config = read_config(config_path)
     workflow = WORKFLOWS.get(config.get("source", {}).get("type"), "csv-baseline")
     # Le run est ouvert AVANT l'acquisition ; serveur injoignable -> erreur explicite ici.
     ctx = tracking.open_run(config, config_file, workflow) if tracking.enabled(config) else None
+    log = logger()
+    log.info("Ingestion : workflow=%s, config=%s, run MLflow=%s", workflow, config_file,
+             ctx["run_id"] if ctx else "indisponible (suivi désactivé)")
     with tracking.stage(ctx, "ingestion"):
         result = _acquire(config_file, config, ctx)
         if ctx is not None:
             _track_ingestion(ctx, result, config)
+    log.info("Ingestion terminée : %d jeux, snapshot sha256=%s", len(result["data"]),
+             (result.get("provenance") or {}).get("snapshot_sha256", "indisponible"))
     return result

@@ -16,6 +16,7 @@ from sklearn.metrics import (accuracy_score, classification_report, confusion_ma
                              mean_absolute_error, mean_squared_error, r2_score)
 
 from src import tracking
+from src.orchestration import logger, step
 from src.preprocessing import (CLASSIFICATION_TARGET, RAW_FEATURE_COLUMNS, eligible_regression)
 
 
@@ -117,12 +118,17 @@ def resolve_run_dir(config, paths):
     return paths["runs_dir"] / stamp
 
 
+@step("Évaluation et publication")
 def evaluate_models(trained_models):
     """Prédire sur test, comparer aux baselines, publier les artefacts après succès des deux tâches."""
     ctx = trained_models.get("tracking")
+    log = logger()
+    log.info("Évaluation et publication (run MLflow=%s)", ctx["run_id"] if ctx else "indisponible")
     with tracking.stage(ctx, "evaluation"):
         result = _evaluate(trained_models, ctx)
     tracking.finish(ctx)
+    log.info("Pipeline publié : %s ; MAE test=%.3f ; F1 macro test=%.3f", result["run_dir"],
+             result["metrics"]["regression"]["mae"], result["metrics"]["classification"]["f1_macro"])
     return result
 
 
