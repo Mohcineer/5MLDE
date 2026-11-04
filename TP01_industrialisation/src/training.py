@@ -56,6 +56,6 @@ def _train(prepared_data, ctx):
         "validation": prepared_data.get("validation"),
         "snapshot": prepared_data["snapshot"],
         "provenance": prepared_data.get("provenance"),
-        "tracking": ctx, "validation_corpus": prepared_data.get("validation_corpus"),
+        "cache": prepared_data.get("cache"), "tracking": ctx, "validation_corpus": prepared_data.get("validation_corpus"),
         "tasks": trained,
     }

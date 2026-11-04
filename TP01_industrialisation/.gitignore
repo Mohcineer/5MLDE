@@ -16,4 +16,5 @@ mlruns/
 *.sqlite
 *.sqlite3
 *.db
-cache/
+cache/.prefect_results/
+config_*.generated.json
