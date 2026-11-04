@@ -28,7 +28,6 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer, OneHotEncoder
 
 from prefect import task
-from prefect.filesystems import LocalFileSystem
 
 from src import tracking
 from src.orchestration import logger, step
@@ -263,11 +262,28 @@ def partition_cache_key(frame, config):
     return "partitions-" + hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
-@task(name="Partitions train/test (cache)", retries=0, persist_result=True,
-      result_storage=LocalFileSystem(basepath=str(RESULTS_DIR)),
-      cache_key_fn=lambda context, parameters: parameters["cache_key"])
-def compute_partitions_cached(frame, thresholds, test_size, seed, cache_key):
+def _partitions_task(frame, thresholds, test_size, seed, cache_key):
     return _compute_partitions(frame, thresholds, test_size, seed)
+
+
+def _make_cached_task():
+    """Tâche cachée, résultats persistés dans un dossier local du poste (`.prefect_results`).
+
+    Un chemin est accepté par le SDK ; un bloc non enregistré côté serveur est refusé. Si cette forme
+    n'est pas acceptée par la version installée, repli sur le stockage local par défaut de Prefect.
+    """
+    options = dict(name="Partitions train/test (cache)", retries=0, persist_result=True,
+                   cache_key_fn=lambda context, parameters: parameters["cache_key"])
+    for storage in (RESULTS_DIR, None):
+        try:
+            extra = {"result_storage": storage} if storage is not None else {}
+            return task(**options, **extra)(_partitions_task)
+        except TypeError:
+            continue
+    raise RuntimeError("Impossible de configurer le stockage des résultats du cache.")
+
+
+compute_partitions_cached = _make_cached_task()
 
 
 def partitions_with_state(frame, config):
