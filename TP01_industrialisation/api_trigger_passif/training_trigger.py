@@ -65,7 +65,15 @@ def freeze_batch(batch):
     return path, sha256_bytes(content)
 
 
-def write_config(batch_id, csv_path):
+def tracking_settings(batch_id, digest):
+    """Suivi MLflow du lot : un run par lot (jamais par POST), publication stable = lot + empreinte."""
+    if not os.getenv("MLFLOW_TRACKING_URI"):
+        return None
+    return {"enabled": True, "batch_id": batch_id, "publication_id": f"push-batch-{batch_id}-{digest[:12]}",
+            "experiment": os.getenv("MLFLOW_EXPERIMENT", "5mlde-steam")}
+
+
+def write_config(batch_id, csv_path, digest=None):
     directory = batch_dir(batch_id)
     config = {
         "source": {"type": "push_batch", "path": csv_path.name},
@@ -74,9 +82,44 @@ def write_config(batch_id, csv_path):
         "test_size": 0.2,
         "thresholds": {"regression_min_reviews": 10, "classification_min_class_count": 5},
     }
+    tracking_cfg = tracking_settings(batch_id, digest) if digest else None
+    if tracking_cfg:
+        config["tracking"] = tracking_cfg
     path = directory / "config.json"
     path.write_text(json.dumps(config, indent=2), encoding="utf-8")
     return path
+
+
+def publish_models(batch_id, csv_path, digest):
+    """Relier lot -> run et enregistrer les deux modèles de DÉMONSTRATION (idempotent).
+
+    Reprise d'un lot déjà publié : la version existante pour cette publication est réutilisée.
+    """
+    settings = tracking_settings(batch_id, digest)
+    if settings is None:
+        return None
+    from src import registry, tracking
+    from src.preprocessing import RAW_FEATURE_COLUMNS
+    tracking.configure({})
+    client = tracking.client()
+    experiment = client.get_experiment_by_name(settings["experiment"])
+    runs = client.search_runs(
+        [experiment.experiment_id], max_results=1, order_by=["attributes.start_time DESC"],
+        filter_string=f"tags.publication_id = '{settings['publication_id']}' and attributes.status = 'FINISHED'")
+    if not runs:
+        raise TrainingFailed(f"Aucun run MLflow terminé pour la publication {settings['publication_id']}.")
+    run_id = runs[0].info.run_id
+    example = pd.read_csv(csv_path)[RAW_FEATURE_COLUMNS].head(5)
+    versions = {}
+    for task in ("regression", "classification"):
+        version = registry.register(run_id, task, settings["publication_id"], demo=True, example=example)
+        report = registry.qualify(registry.model_name(task, demo=True), version.version)
+        versions[task] = {"name": registry.model_name(task, demo=True), "version": version.version,
+                          "qualification": report["status"]}
+    link = {"batch_id": batch_id, "run_id": run_id, "publication_id": settings["publication_id"],
+            "snapshot_sha256": digest, "models": versions}
+    (batch_dir(batch_id) / "mlflow.json").write_text(json.dumps(link, indent=2), encoding="utf-8")
+    return link
 
 
 def published_run(run_dir, csv_sha256):
@@ -109,11 +152,13 @@ def trigger_training(batch):
     run_dir = batch_dir(batch_id) / "run"
 
     if published_run(run_dir, digest):
-        return {"run_dir": str(run_dir), "snapshot_sha256": digest, "already_published": True}
+        link = publish_models(batch_id, csv_path, digest)
+        return {"run_dir": str(run_dir), "snapshot_sha256": digest, "already_published": True,
+                "mlflow": link}
     if run_dir.exists():
         raise TrainingFailed(f"Le dossier de run {run_dir} existe avec une autre empreinte.")
 
-    config_path = write_config(batch_id, csv_path)
+    config_path = write_config(batch_id, csv_path, digest)
     completed = subprocess.run(
         [sys.executable, "main.py", "--config", str(config_path)],
         cwd=PROJECT_ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace",
@@ -122,4 +167,6 @@ def trigger_training(batch):
         lines = [line for line in completed.stderr.strip().splitlines() if line.strip()]
         reason = lines[-1] if lines else f"code de sortie {completed.returncode}"
         raise TrainingFailed(reason, latest_rejection_report(batch_dir(batch_id)))
-    return {"run_dir": str(run_dir), "snapshot_sha256": digest, "already_published": False}
+    link = publish_models(batch_id, csv_path, digest)
+    return {"run_dir": str(run_dir), "snapshot_sha256": digest, "already_published": False,
+            "mlflow": link}

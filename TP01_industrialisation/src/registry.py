@@ -174,7 +174,10 @@ def qualify(name, number, policy=None):
     policy, client = policy or load_policy(), tracking.client()
     version = client.get_model_version(name, str(number))
     try:
-        decision = decide(version.tags["task"], _evidence(client, version), policy)
+        if version.tags.get("workflow") in policy["demo_workflows"]:  # PUSH : pas de preuve Steam requise
+            decision = decide(version.tags["task"], {"workflow": version.tags["workflow"]}, policy)
+        else:
+            decision = decide(version.tags["task"], _evidence(client, version), policy)
     except Exception as exc:  # rapport absent/illisible : attente motivée, jamais de qualification positive
         decision = {"status": "pending", "checks": [], "reasons": [f"rapport incomplet : {exc}"]}
     stamp = _now()
