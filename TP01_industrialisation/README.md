@@ -118,6 +118,48 @@ Docs Swagger : <http://127.0.0.1:8000/docs>. État durable : `artifacts/push.sql
 
 Codes : 202 accepté (avec `batch_id` au 500ᵉ), 200 doublon identique (même événement ou même jeu), 409 conflit, 422 invalide.
 
+## TP3 — Suivi MLflow, qualification et sélection
+
+Serveur : `docker compose up -d --wait mlflow` depuis `TP00_setup_des_postes` (MLflow 3.16.1). Dans chaque terminal :
+
+```powershell
+$env:MLFLOW_TRACKING_URI = "http://localhost:5000"
+$env:MLFLOW_REGISTRY_URI = "http://localhost:5000"
+```
+
+Sans `MLFLOW_TRACKING_URI`, le suivi refuse d'écrire (jamais de dossier `mlruns` local involontaire). Le suivi s'active par
+`"tracking": {"enabled": true, ...}` dans la configuration ; sans ce bloc, les TP1/TP2 fonctionnent comme avant.
+
+| Élément | Où |
+|---|---|
+| Module technique MLflow (runs explicites, `run_id` transmis entre étapes, échec -> `FAILED` avec étape et cause) | `src/tracking.py` |
+| Politique de qualification versionnée (seuils, empreinte du corpus, provenance) | `policy.json` |
+| Décision testable, enregistrement idempotent, tags de version, alias, retour arrière | `src/registry.py` |
+| Corpus de validation réservé (appids exclus de l'apprentissage), `steam-validation-v1` | `validation/`, `make_validation_corpus.py` |
+| Deux variantes comparables + enregistrement + qualification + `comparison.md` | `run_experiments.py` |
+| Rechargement par alias et par numéro dans un nouveau processus | `verify_reload.py` |
+
+Un run MLflow par tentative d'entraînement (les deux modèles) ; en PUSH, un run par lot de 500 jeux (`batch_id` -> `run_id` dans
+`artifacts/batches/batch_<id>/mlflow.json`). Modèles du registre : `steam-regression`, `steam-classification` ; `-demo` pour les
+modèles synthétiques du PUSH (toujours `demo-only`).
+
+```powershell
+uv run python run_experiments.py --config config_pull.json                      # variantes v-a / v-b, qualification
+uv run python -m src.registry qualify steam-regression 1                        # nouvelle évaluation (rapport daté)
+uv run python -m src.registry select steam-regression 1 --actor moi --reason "..."   # refusé si non qualifié
+uv run python -m src.registry rollback steam-regression                         # version précédemment sélectionnée
+uv run python verify_reload.py steam-regression                                 # models:/<nom>@champion == models:/<nom>/<n>
+```
+
+Reprise : une publication a un `publication_id` stable ; relancer `run_experiments.py` ou rappeler le déclencheur d'un lot déjà
+publié ne crée aucune version en double. Après une panne du serveur pendant un run, un diagnostic local
+`diagnostics/mlflow_unreconciled_<run_id>.json` est écrit ; après reprise :
+`tracking.reconcile_unclosed_runs("diagnostics")`. Les runs restés `RUNNING` après un arrêt brutal se listent avec
+`tracking.find_open_runs()`.
+
+Résultats constatés (corpus `steam-validation-v1`) : régression qualifiée (MAE 12,82 contre 13,92 pour la baseline) ; classification
+refusée (F1 macro 0,11 contre 0,07, seuil 0,25 ; classes jamais reconnues) : aucun alias `champion` pour la classification.
+
 ## Limites
 
 - Les labels du simulateur sont artificiels : les scores des lots PUSH ne disent rien sur Steam. Les scores PULL/PUSH ne sont pas
